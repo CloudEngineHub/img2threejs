@@ -20,3 +20,5 @@ docs/PLAN_*.md
 
 # Extracted Valve CS2 textures -- IP belongs to Valve, never committed.
 cs2_textures/
+
+.cache/spec-search/
