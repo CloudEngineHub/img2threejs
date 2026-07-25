@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from forge._shared.spec_search import (  # noqa: E402
     CacheReadError,
+    CacheValidationError,
     CacheWriteError,
     IndexBuildError,
     IndexLoadResult,
@@ -228,7 +229,7 @@ def main(argv: Sequence[str]) -> int:
             context,
             CliFailure("index_failure", str(error), 3),
         )
-    except (CacheReadError, CacheWriteError) as error:
+    except (CacheReadError, CacheValidationError, CacheWriteError) as error:
         return _emit_error(
             context,
             CliFailure("cache_failure", str(error), 3),

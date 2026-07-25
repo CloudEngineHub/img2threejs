@@ -869,6 +869,30 @@ class CacheLifecycleTest(unittest.TestCase):
 
 
 class CliOutputTest(unittest.TestCase):
+    def test_symlinked_cache_parent_returns_structured_cache_failure(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            cli = write_cli_fixture(root)
+            outside = root.parent / f"{root.name}-outside"
+            outside.mkdir()
+            (root / ".cache").mkdir()
+            (root / ".cache" / "spec-search").symlink_to(outside, target_is_directory=True)
+
+            result = subprocess.run(
+                [sys.executable, str(cli), "needle", "--json"],
+                cwd=root,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            payload = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 3)
+            self.assertEqual(payload["error"]["code"], "cache_failure")
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse((outside / "cs2.json").exists())
+
     def test_clean_style_project_searches_committed_distilled_records_without_raw_roots(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
