@@ -9,6 +9,8 @@ import math
 import re
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_shared"))
+from status_banner import emit_status
 
 
 def slugify(value: str) -> str:
@@ -204,6 +206,8 @@ def make_quality_contract() -> dict:
             "Do not pass material look-dev without macro, meso, and micro surface frequency bands for close-up materials.",
             "Do not pass reference-fidelity material look-dev from a source image without usable referencePbr maps or an explicit documented limitation.",
             "Do not patch a spec with extracted PBR maps when extraction confidence is below the target threshold unless the user explicitly accepts lower fidelity.",
+            "Do not place adjacent separate-geometry parts below 0.02 world-unit seam overlap (source: grimoire/build/geometry_patterns.md).",
+            "Do not satisfy raised or recessed relief, fasteners, or grip structure with a map alone when the feature affects form; use geometry or displacement (source: grimoire/build/geometry_patterns.md).",
         ],
     }
 
@@ -215,6 +219,36 @@ def load_assessment(path: Path | None) -> dict | None:
     if not isinstance(payload, dict):
         raise ValueError("assessment must be a JSON object")
     return payload
+
+
+def inject_geometry_rules(spec: dict, target_name: str) -> None:
+    contract = spec.setdefault("qualityContract", {})
+    prohibitions = contract.setdefault("mustNotDo", contract.get("antiShallowSpecRules", []))
+    if not isinstance(prohibitions, list):
+        prohibitions = []
+    source = "source: grimoire/build/geometry_patterns.md"
+    rules = [
+        f"Adjacent components must overlap by at least 0.02 world units at shared seams ({source}).",
+        f"Raised or recessed relief and fasteners must be geometry, instanced micro-parts, or displacement; a map alone is an approximation ({source}).",
+    ]
+    object_tokens = set(re.findall(r"[a-z0-9]+", target_name.lower()))
+    if object_tokens & {"blade", "knife", "sword", "dagger", "spear", "bowie"}:
+        rules.append(f"Blade components must vary in thickness from spine to edge and taper from ricasso toward the tip ({source}).")
+    for rule in rules:
+        if rule not in prohibitions:
+            prohibitions.append(rule)
+    contract["mustNotDo"] = prohibitions
+    spec["qualityContract"] = contract
+    inventory = spec.get("preSpecAssessment", {}).get("detailInventory", {})
+    details = inventory.get("details", []) if isinstance(inventory, dict) else []
+    if isinstance(details, list):
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            mapping = detail.get("mapsTo")
+            detail["realization"] = detail.get("realization") or ("map-only" if isinstance(mapping, dict) and mapping.get("type") == "map" else "unreported")
+            if detail["realization"] == "map-only" and detail.get("kind") in {"fastener", "relief", "linework"}:
+                detail["approximation"] = f"Map-only detail; geometry guidance requires physical relief ({source})."
 
 
 def _cnode(cid, name, primitive, parent, position, scale,
@@ -930,7 +964,7 @@ def make_spec(target_name: str, image: str | None, assessment_payload: dict | No
                 "secondary lighting match",
             ],
             "fpsTarget": 60,
-            "reviewViewpoints": ["front", "three-quarter", "side"],
+            "reviewViewpoints": ["front", "three-quarter", "side", "thickness-axis", "long-axis"],
         },
         "selfCorrectLoop": {
             "enabled": True,
@@ -1524,6 +1558,7 @@ def make_spec(target_name: str, image: str | None, assessment_payload: dict | No
     }
     if local_spec_search is not None:
         spec["localSpecSearch"] = local_spec_search
+    inject_geometry_rules(spec, target_name)
     return spec
 
 
@@ -1554,6 +1589,7 @@ def main(argv: list[str]) -> int:
                         help="Mark the code-generated default environment as unavailable (testing/last-resort only) "
                              "-- validate_sculpt_spec.py blocks view-dependent finishes when set")
     args = parser.parse_args(argv)
+    emit_status(None, next_command="forge/stage2_spec/new_sculpt_spec.py")
 
     assessment = load_assessment(args.assessment)
     manifest = None

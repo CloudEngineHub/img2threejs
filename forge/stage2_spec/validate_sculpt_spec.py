@@ -1020,7 +1020,7 @@ def validate_quality_contract(spec: dict[str, Any], errors: list[str], warnings:
             validate_string_array(group.get("failureModes"), f"qualityContract.featureGroups[{index}].failureModes", errors)
             if group.get("required") is True and not group.get("qualityCriteria"):
                 warnings.append(f"quality: required feature group {group.get('id', index)!r} has no qualityCriteria")
-    for field in ("visualDeltaChecks", "antiShallowSpecRules"):
+    for field in ("visualDeltaChecks", "antiShallowSpecRules", "mustNotDo"):
         validate_string_array(contract.get(field), f"qualityContract.{field}", errors)
         if isinstance(contract.get(field), list) and not contract[field]:
             warnings.append(f"quality: qualityContract.{field} is empty")
@@ -1780,8 +1780,13 @@ def _has_gloss_response(spec: dict[str, Any]) -> bool:
 
 
 def _has_repetition_or_small_parts(spec: dict[str, Any]) -> bool:
-    if [r for r in spec.get("repetitionSystems", []) if isinstance(r, dict)]:
-        return True
+    for repetition in spec.get("repetitionSystems", []):
+        if not isinstance(repetition, dict):
+            continue
+        if repetition.get("realization") == "map-only" or repetition.get("buildsGeometry") is False:
+            continue
+        if repetition.get("geometry") is not None or repetition.get("instances") is not None or repetition.get("buildsGeometry") is True:
+            return True
     return any(
         isinstance(c, dict) and c.get("level") == "micro"
         for c in spec.get("componentTree", [])

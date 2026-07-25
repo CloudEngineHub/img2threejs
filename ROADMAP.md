@@ -8,6 +8,7 @@ This roadmap outlines the planned evolution of img2threejs from its initial rele
 |---|---|---|---|
 | v1.0 | Object pipeline | Shipped | Staged sculpt pipeline (blockout through optimization), render-vs-reference review loop, action-ready runtime hierarchy |
 | v1.1 | Detail-first analysis | Shipped | Required detailInventory artifact (gloss, bevel, fasteners, linework, stains), strict-quality gate blocking shallow specs before codegen |
+| v1.2-gates | Portable structural gates | In progress | Host-specific tool-call enforcement is deferred; portable ledger, geometry, evidence, and report gates run in forge scripts. |
 | v1.2 | Humanoid character generator | Shipped | Character/hybrid domain detection, anatomy and facial landmarks, proportion-lock and feature-placement build passes, per-part character materials |
 | v1.3 | Likeness maximization | Planned | Projection-first path wired into character rendering (camera solve, de-lighting, texture projection), opt-in generativeAssist mode with confidence reporting, high-likeness character demo |
 | v1.4 | Animation-ready rigs | Planned | True humanoid rig and pivot hierarchy (replacing current world-space flatten), SkinnedMesh with morph targets, glTF export |

@@ -141,6 +141,13 @@ A procedural object is usually failing when:
 
 ## Critical Reconstruction Patterns (from Bowie Knife reconstruction failure analysis)
 
+### Failure record: Classic Fade projection passed as structure
+
+The Classic Fade incident exposed open card meshes, constant blade stock, and seams
+below the documented overlap. Portable gates now enforce mesh boundaries, seam
+overlap, blade grind/distal taper, map-stripped blockout evidence, and ordered pass
+credit so each failure is visible at the pass that owns it.
+
 **Blades need a real grind, not constant thickness.** A constant-thickness slab reads as a toy cutout even with perfect silhouette. Model a wedge cross-section tapering to a sharp cutting edge using a grind function:
 - For each point on the blade surface, compute height ratio from cutting edge (0) to spine (1)
 - Apply a grind curve (smoothstep or power function) to taper thickness: full stock at spine, zero at edge

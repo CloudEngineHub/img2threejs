@@ -24,8 +24,9 @@ action-ready props, game objects, botanical/mechanical parts, and stylized recon
 ## Core Promise
 
 Sculpt from a photo, in order — never one-shot a mesh:
-1. **Validate** the image is a suitable 3D target (`grimoire/intake/validation_rubric.md`).
-2. **Assess** object class + complexity, then write a `qualityContract` before any code.
+1. **Run `python3 forge/next.py <spec>` first.** It reports the current unlocked pass, exact next command, and unmet acceptance criteria.
+2. **Validate** the image is a suitable 3D target (`grimoire/intake/validation_rubric.md`).
+3. **Assess** object class + complexity, then write a `qualityContract` before any code.
 3. **Spec** it: component hierarchy, materials, lighting, pivots, sockets, action anchors.
 4. **Build pass-by-pass** from blockout → structure → form → material → lighting → interaction → optimization.
 5. **Verify** each pass with a screenshot compared against the reference; fail a pass if an identity-defining feature is wrong even when the global score looks fine.
