@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import re
+import stat
 import tempfile
 import unicodedata
 from collections import Counter
@@ -20,6 +21,8 @@ JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 SourceKind: TypeAlias = Literal["markdown", "json", "jsonl"]
 CacheStatus: TypeAlias = Literal["hit", "rebuilt"]
 CacheReason: TypeAlias = Literal["current", "missing", "stale", "corrupt", "forced"]
+UnicodeNormalization: TypeAlias = Literal["NFC", "NFD", "NFKC", "NFKD"]
+AccentFold: TypeAlias = Literal["none", "vi"]
 _SOURCE_KINDS: Final[dict[str, SourceKind]] = {
     ".md": "markdown",
     ".json": "json",
@@ -29,16 +32,14 @@ _SOURCE_KINDS: Final[dict[str, SourceKind]] = {
 
 class TokenizerSettings(TypedDict):
     version: str
-    unicode_normalization: str
+    unicode_normalization: UnicodeNormalization
     casefold: bool
-    accent_fold: str
+    accent_fold: AccentFold
     preserve_identifiers: bool
     preserve_numbers: bool
-    stemming: bool
 
 
 class AliasSettings(TypedDict):
-    mode: str
     enabled: bool
     max_expansions: int
 
@@ -50,6 +51,7 @@ class Bm25Settings(TypedDict):
 
 class CollectionProfile(TypedDict):
     source_roots: list[str]
+    optional_source_roots: list[str]
     distilled_records: list[str]
     cache: str
     documentation: str
@@ -114,6 +116,15 @@ class CachedSourceReference(TypedDict):
     key_path: str | None
 
 
+class CachedEvidenceReferenceRequired(TypedDict):
+    kind: str
+    ref: str
+
+
+class CachedEvidenceReference(CachedEvidenceReferenceRequired, total=False):
+    note: str
+
+
 class CachedRecord(TypedDict):
     record_id: str
     collection: str
@@ -124,6 +135,7 @@ class CachedRecord(TypedDict):
     key_path: str | None
     aliases: list[str]
     source_refs: list[CachedSourceReference]
+    evidence_refs: list[CachedEvidenceReference]
 
 
 class CachedPosting(TypedDict):
@@ -141,6 +153,7 @@ class CachePayload(TypedDict):
     collection: str
     k1: float
     b: float
+    tokenizer: TokenizerSettings
     document_lengths: dict[str, int]
     avgdl: float
     document_frequencies: dict[str, int]
@@ -157,6 +170,13 @@ class SourceReference:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceReference:
+    kind: str
+    ref: str
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SourceDocument:
     record_id: str
     collection: str
@@ -167,6 +187,17 @@ class SourceDocument:
     key_path: str | None = None
     aliases: tuple[str, ...] = ()
     source_refs: tuple[SourceReference, ...] = ()
+    evidence_refs: tuple[EvidenceReference, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TokenizerConfig:
+    version: str = "1"
+    unicode_normalization: UnicodeNormalization = "NFKC"
+    casefold: bool = True
+    accent_fold: AccentFold = "vi"
+    preserve_identifiers: bool = True
+    preserve_numbers: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +205,7 @@ class Bm25Config:
     collection: str
     k1: float = 1.5
     b: float = 0.75
+    tokenizer: TokenizerConfig = TokenizerConfig()
     term_aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
@@ -207,6 +239,7 @@ class Bm25Index:
     collection: str
     k1: float
     b: float
+    tokenizer: TokenizerConfig
     fingerprints: IndexFingerprints
     document_lengths: Mapping[str, int]
     avgdl: float
@@ -234,6 +267,7 @@ class SerializedSearchMatch(TypedDict):
     score: float
     snippets: list[str]
     source_refs: list[CachedSourceReference]
+    evidence_refs: list[CachedEvidenceReference]
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,9 +376,24 @@ class CacheWriteError(Exception):
 
 
 _DEFAULT_PROFILES_PATH: Final = Path(__file__).with_name("spec_search_profiles.json")
-_CACHE_SCHEMA_VERSION: Final = 1
-_TOKENIZER_SCHEMA_VERSION: Final = "1"
-_TOKEN_PATTERN: Final = re.compile(r"[^\W_]+(?:[_.\-\u2010-\u2015][^\W_]+)*", re.UNICODE)
+_CACHE_SCHEMA_VERSION: Final = 2
+_TOKENIZER_SCHEMA_VERSION: Final = "2"
+_DEFAULT_TOKENIZER_CONFIG: Final = TokenizerConfig()
+_NORMALIZATION_BY_NAME: Final[dict[str, UnicodeNormalization]] = {
+    "NFC": "NFC",
+    "NFD": "NFD",
+    "NFKC": "NFKC",
+    "NFKD": "NFKD",
+}
+_ACCENT_FOLD_BY_NAME: Final[dict[str, AccentFold]] = {
+    "none": "none",
+    "vi": "vi",
+}
+_IDENTIFIER_TOKEN_PATTERN: Final = re.compile(
+    r"[^\W_]+(?:[_.\-\u2010-\u2015][^\W_]+)*",
+    re.UNICODE,
+)
+_WORD_TOKEN_PATTERN: Final = re.compile(r"[^\W_]+", re.UNICODE)
 _DASH_TRANSLATION: Final = str.maketrans({character: "-" for character in "‐‑‒–—―"})
 _VIETNAMESE_MARKED: Final = frozenset(
     "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợ"
@@ -395,6 +444,38 @@ def _profile_number(mapping: dict[str, JsonValue], field: str, path: Path) -> fl
     return float(value)
 
 
+def _profile_normalization(
+    mapping: dict[str, JsonValue],
+    field: str,
+    path: Path,
+) -> UnicodeNormalization:
+    value = _profile_string(mapping, field, path)
+    normalization = _NORMALIZATION_BY_NAME.get(value)
+    if normalization is None:
+        raise _profile_error(path, f"{field} must be NFC, NFD, NFKC, or NFKD")
+    return normalization
+
+
+def _profile_accent_fold(
+    mapping: dict[str, JsonValue],
+    field: str,
+    path: Path,
+) -> AccentFold:
+    value = _profile_string(mapping, field, path)
+    accent_fold = _ACCENT_FOLD_BY_NAME.get(value)
+    if accent_fold is None:
+        raise _profile_error(path, f"{field} must be none or vi")
+    return accent_fold
+
+
+def _profile_cache_path(mapping: dict[str, JsonValue], path: Path) -> str:
+    configured = _profile_string(mapping, "cache", path)
+    cache_path = Path(configured)
+    if cache_path.is_absolute() or ".." in cache_path.parts:
+        raise _profile_error(path, "cache path must be relative and stay within project_root")
+    return configured
+
+
 def load_profiles(path: Path | None = None) -> dict[str, CollectionProfile]:
     profile_path = _DEFAULT_PROFILES_PATH if path is None else path
     try:
@@ -416,15 +497,17 @@ def load_profiles(path: Path | None = None) -> dict[str, CollectionProfile]:
         raise _profile_error(profile_path, "defaults.aliases.max_expansions must be a non-negative integer")
     tokenizer: TokenizerSettings = {
         "version": _profile_string(tokenizer_raw, "version", profile_path),
-        "unicode_normalization": _profile_string(tokenizer_raw, "unicode_normalization", profile_path),
+        "unicode_normalization": _profile_normalization(
+            tokenizer_raw,
+            "unicode_normalization",
+            profile_path,
+        ),
         "casefold": _profile_bool(tokenizer_raw, "casefold", profile_path),
-        "accent_fold": _profile_string(tokenizer_raw, "accent_fold", profile_path),
+        "accent_fold": _profile_accent_fold(tokenizer_raw, "accent_fold", profile_path),
         "preserve_identifiers": _profile_bool(tokenizer_raw, "preserve_identifiers", profile_path),
         "preserve_numbers": _profile_bool(tokenizer_raw, "preserve_numbers", profile_path),
-        "stemming": _profile_bool(tokenizer_raw, "stemming", profile_path),
     }
     alias_settings: AliasSettings = {
-        "mode": _profile_string(alias_raw, "mode", profile_path),
         "enabled": _profile_bool(alias_raw, "enabled", profile_path),
         "max_expansions": max_expansions,
     }
@@ -444,9 +527,14 @@ def load_profiles(path: Path | None = None) -> dict[str, CollectionProfile]:
         }
         parsed[name] = {
             "source_roots": _profile_string_list(collection, "source_roots", profile_path),
+            "optional_source_roots": _profile_string_list(
+                collection,
+                "optional_source_roots",
+                profile_path,
+            ),
             "distilled_records": _profile_string_list(collection, "distilled_records", profile_path),
             "documentation": _profile_string(collection, "documentation", profile_path),
-            "cache": _profile_string(collection, "cache", profile_path),
+            "cache": _profile_cache_path(collection, profile_path),
             "encoding": _profile_string(defaults, "encoding", profile_path),
             "languages": _profile_string_list(defaults, "languages", profile_path),
             "source_extensions": _profile_string_list(defaults, "source_extensions", profile_path),
@@ -600,21 +688,35 @@ def load_jsonl_records(path: Path) -> list[SpecRecord]:
     return records
 
 
-def _primary_tokens(text: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKC", text).casefold()
-    return [match.group(0).translate(_DASH_TRANSLATION) for match in _TOKEN_PATTERN.finditer(normalized)]
+def _primary_tokens(text: str, tokenizer: TokenizerConfig) -> list[str]:
+    normalized = unicodedata.normalize(tokenizer.unicode_normalization, text)
+    if tokenizer.casefold:
+        normalized = normalized.casefold()
+    pattern = _IDENTIFIER_TOKEN_PATTERN if tokenizer.preserve_identifiers else _WORD_TOKEN_PATTERN
+    tokens = [
+        match.group(0).translate(_DASH_TRANSLATION)
+        for match in pattern.finditer(normalized)
+    ]
+    if tokenizer.preserve_numbers:
+        return tokens
+    return [token for token in tokens if any(character.isalpha() for character in token)]
 
 
 def _accent_companion(token: str) -> str | None:
-    if not any(character in _VIETNAMESE_MARKED for character in token):
+    if not any(character.casefold() in _VIETNAMESE_MARKED for character in token):
         return None
     decomposed = unicodedata.normalize("NFD", token)
     folded = "".join(character for character in decomposed if unicodedata.category(character) != "Mn")
-    folded = folded.replace("đ", "d")
+    folded = folded.replace("đ", "d").replace("Đ", "D")
     return folded if folded != token else None
 
 
-def _with_accent_companions(tokens: Sequence[str]) -> list[str]:
+def _with_accent_companions(
+    tokens: Sequence[str],
+    accent_fold: AccentFold,
+) -> list[str]:
+    if accent_fold == "none":
+        return list(tokens)
     expanded: list[str] = []
     for token in tokens:
         expanded.append(token)
@@ -624,21 +726,39 @@ def _with_accent_companions(tokens: Sequence[str]) -> list[str]:
     return expanded
 
 
-def tokenize(text: str, aliases: Mapping[str, Sequence[str]] | None = None) -> list[str]:
-    primary = _primary_tokens(text)
-    tokens = _with_accent_companions(primary)
+def tokenize(
+    text: str,
+    aliases: Mapping[str, Sequence[str]] | None = None,
+    tokenizer: TokenizerConfig = _DEFAULT_TOKENIZER_CONFIG,
+) -> list[str]:
+    primary = _primary_tokens(text, tokenizer)
+    tokens = _with_accent_companions(primary, tokenizer.accent_fold)
     if aliases is None:
         return tokens
     normalized_aliases = sorted(
-        ((_primary_tokens(term), tuple(values)) for term, values in aliases.items()),
+        (
+            (_primary_tokens(term, tokenizer), tuple(values))
+            for term, values in aliases.items()
+        ),
         key=lambda item: item[0],
     )
     for alias_tokens, expansions in normalized_aliases:
         width = len(alias_tokens)
         if width == 0 or not any(primary[index : index + width] == alias_tokens for index in range(len(primary) - width + 1)):
             continue
-        for expansion in sorted(expansions, key=lambda value: unicodedata.normalize("NFKC", value).casefold()):
-            tokens.extend(_with_accent_companions(_primary_tokens(expansion)))
+        for expansion in sorted(
+            expansions,
+            key=lambda value: unicodedata.normalize(
+                tokenizer.unicode_normalization,
+                value,
+            ).casefold(),
+        ):
+            tokens.extend(
+                _with_accent_companions(
+                    _primary_tokens(expansion, tokenizer),
+                    tokenizer.accent_fold,
+                )
+            )
     return tokens
 
 
@@ -745,6 +865,14 @@ def _ingest_jsonl(path: Path, source_path: str) -> list[SourceDocument]:
             )
             for source_ref in record["source_refs"]
         )
+        evidence_references = tuple(
+            EvidenceReference(
+                kind=evidence_ref["kind"],
+                ref=evidence_ref["ref"],
+                note=evidence_ref.get("note"),
+            )
+            for evidence_ref in record["evidence_refs"]
+        )
         documents.append(
             SourceDocument(
                 record_id=record["record_id"],
@@ -754,6 +882,7 @@ def _ingest_jsonl(path: Path, source_path: str) -> list[SourceDocument]:
                 file_path=source_path,
                 aliases=tuple(record["aliases"]),
                 source_refs=references,
+                evidence_refs=evidence_references,
             )
         )
     return documents
@@ -766,20 +895,77 @@ def _source_kind(path: Path) -> SourceKind:
     return kind
 
 
+def _source_tree_files(root: Path, *, optional: bool) -> list[Path]:
+    try:
+        root_mode = root.lstat().st_mode
+    except FileNotFoundError as error:
+        if optional:
+            return []
+        raise SourceIngestionError(
+            path=root,
+            reason="configured source root is not a directory",
+        ) from error
+    except OSError as error:
+        raise SourceIngestionError(
+            path=root,
+            reason="unable to read configured source root",
+        ) from error
+    if stat.S_ISLNK(root_mode):
+        raise SourceIngestionError(path=root, reason="symbolic links are not allowed")
+    if not stat.S_ISDIR(root_mode):
+        raise SourceIngestionError(
+            path=root,
+            reason="configured source root is not a directory",
+        )
+
+    files: list[Path] = []
+
+    def visit(directory: Path) -> None:
+        try:
+            children = sorted(
+                directory.iterdir(),
+                key=lambda candidate: candidate.name,
+            )
+        except OSError as error:
+            raise SourceIngestionError(
+                path=directory,
+                reason="unable to read configured source root",
+            ) from error
+        for child in children:
+            try:
+                child_mode = child.lstat().st_mode
+            except OSError as error:
+                raise SourceIngestionError(
+                    path=child,
+                    reason="unable to inspect configured source",
+                ) from error
+            if stat.S_ISLNK(child_mode):
+                raise SourceIngestionError(
+                    path=child,
+                    reason="symbolic links are not allowed",
+                )
+            relative = child.relative_to(root)
+            if _hidden_source(relative):
+                continue
+            if stat.S_ISDIR(child_mode):
+                visit(child)
+            elif stat.S_ISREG(child_mode):
+                files.append(child)
+
+    visit(root)
+    return files
+
+
 def ingest_source_tree(
     root: Path,
     collection: str,
     extensions: Sequence[str],
 ) -> list[SourceDocument]:
-    if not root.is_dir():
-        raise SourceIngestionError(path=root, reason="configured source root is not a directory")
     allowed = frozenset(extension.casefold() for extension in extensions)
     documents: list[SourceDocument] = []
-    for path in sorted(root.rglob("*"), key=lambda candidate: candidate.relative_to(root).as_posix()):
+    for path in _source_tree_files(root, optional=False):
         relative = path.relative_to(root)
-        if not path.is_file() or path.suffix.casefold() not in allowed:
-            continue
-        if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+        if path.suffix.casefold() not in allowed:
             continue
         source_path = relative.as_posix()
         match _source_kind(path):
@@ -830,7 +1016,9 @@ def build_index(
         if document.record_id in records:
             raise IndexBuildError(reason=f"duplicate record_id: {document.record_id}")
         records[document.record_id] = document
-        term_frequencies = Counter(tokenize(_searchable_text(document), aliases))
+        term_frequencies = Counter(
+            tokenize(_searchable_text(document), aliases, config.tokenizer)
+        )
         document_lengths[document.record_id] = sum(term_frequencies.values())
         for term in sorted(term_frequencies):
             posting_lists.setdefault(term, []).append(
@@ -845,6 +1033,7 @@ def build_index(
         collection=config.collection,
         k1=config.k1,
         b=config.b,
+        tokenizer=config.tokenizer,
         fingerprints=fingerprints,
         document_lengths=document_lengths,
         avgdl=avgdl,
@@ -858,7 +1047,7 @@ def build_index(
 def search_index(index: Bm25Index, query: str) -> list[SearchMatch]:
     if not index.records or index.avgdl == 0:
         return []
-    query_terms = sorted(set(tokenize(query, index.term_aliases)))
+    query_terms = sorted(set(tokenize(query, index.term_aliases, index.tokenizer)))
     scores: dict[str, float] = {}
     document_count = len(index.records)
     for term in query_terms:
@@ -887,7 +1076,7 @@ def search_index(index: Bm25Index, query: str) -> list[SearchMatch]:
 
 def _earliest_token_offset(text: str, query: str) -> int:
     query_tokens = frozenset(tokenize(query))
-    for token_match in _TOKEN_PATTERN.finditer(text):
+    for token_match in _IDENTIFIER_TOKEN_PATTERN.finditer(text):
         if query_tokens.intersection(tokenize(token_match.group(0))):
             return token_match.start()
     return 0
@@ -984,6 +1173,10 @@ def serialize_search_results(
                     }
                     for reference in match.record.source_refs
                 ],
+                "evidence_refs": [
+                    _cached_evidence_reference(reference)
+                    for reference in match.record.evidence_refs
+                ],
             }
         )
         if len(results) == request.limit:
@@ -995,19 +1188,53 @@ def _hidden_source(relative: Path) -> bool:
     return any(part.startswith(".") or part == "__pycache__" for part in relative.parts)
 
 
+def _configured_project_path(
+    request: IndexRequest,
+    configured: str,
+) -> Path:
+    relative = Path(configured)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SourceIngestionError(
+            path=relative,
+            reason="configured source path must be relative and stay within project_root",
+        )
+    candidate = request.project_root / relative
+    current = request.project_root
+    for part in relative.parts:
+        current /= part
+        try:
+            current_mode = current.lstat().st_mode
+        except FileNotFoundError:
+            break
+        except OSError as error:
+            raise SourceIngestionError(
+                path=current,
+                reason="unable to inspect configured source path",
+            ) from error
+        if stat.S_ISLNK(current_mode):
+            raise SourceIngestionError(
+                path=current,
+                reason="symbolic links are not allowed",
+            )
+    return candidate
+
+
 def _configured_sources(request: IndexRequest) -> list[ConfiguredSource]:
     allowed = frozenset(extension.casefold() for extension in request.profile["source_extensions"])
     sources: dict[str, ConfiguredSource] = {}
-    for configured_root in request.profile["source_roots"]:
-        root = request.project_root / configured_root
-        if not root.is_dir():
-            raise SourceIngestionError(path=root, reason="configured source root is not a directory")
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.casefold() not in allowed:
+    configured_roots = (
+        *((configured_root, False) for configured_root in request.profile["source_roots"]),
+        *(
+            (configured_root, True)
+            for configured_root in request.profile["optional_source_roots"]
+        ),
+    )
+    for configured_root, optional in configured_roots:
+        root = _configured_project_path(request, configured_root)
+        for path in _source_tree_files(root, optional=optional):
+            if path.suffix.casefold() not in allowed:
                 continue
             source_path = path.relative_to(request.project_root)
-            if _hidden_source(source_path):
-                continue
             source_key = source_path.as_posix()
             sources[source_key] = ConfiguredSource(
                 path=path,
@@ -1015,12 +1242,19 @@ def _configured_sources(request: IndexRequest) -> list[ConfiguredSource]:
                 kind=_source_kind(path),
             )
     for configured_record in request.profile["distilled_records"]:
-        path = request.project_root / configured_record
-        if not path.is_file():
+        path = _configured_project_path(request, configured_record)
+        try:
+            record_mode = path.lstat().st_mode
+        except OSError as error:
+            raise SourceIngestionError(
+                path=path,
+                reason="configured distilled record source is not a file",
+            ) from error
+        if stat.S_ISLNK(record_mode):
+            raise SourceIngestionError(path=path, reason="symbolic links are not allowed")
+        if not stat.S_ISREG(record_mode):
             raise SourceIngestionError(path=path, reason="configured distilled record source is not a file")
         source_path = path.relative_to(request.project_root)
-        if _hidden_source(source_path):
-            continue
         source_key = source_path.as_posix()
         sources[source_key] = ConfiguredSource(
             path=path,
@@ -1065,7 +1299,6 @@ def _index_fingerprints(request: IndexRequest, sources: Sequence[ConfiguredSourc
             "accent_fold": tokenizer["accent_fold"],
             "preserve_identifiers": tokenizer["preserve_identifiers"],
             "preserve_numbers": tokenizer["preserve_numbers"],
-            "stemming": tokenizer["stemming"],
         },
     }
     tokenizer_fingerprint = _fingerprint(tokenizer_value)
@@ -1104,6 +1337,40 @@ def _cached_source_reference(reference: SourceReference) -> CachedSourceReferenc
     }
 
 
+def _cached_evidence_reference(
+    reference: EvidenceReference,
+) -> CachedEvidenceReference:
+    cached: CachedEvidenceReference = {
+        "kind": reference.kind,
+        "ref": reference.ref,
+    }
+    if reference.note is not None:
+        cached["note"] = reference.note
+    return cached
+
+
+def _tokenizer_config(settings: TokenizerSettings) -> TokenizerConfig:
+    return TokenizerConfig(
+        version=settings["version"],
+        unicode_normalization=settings["unicode_normalization"],
+        casefold=settings["casefold"],
+        accent_fold=settings["accent_fold"],
+        preserve_identifiers=settings["preserve_identifiers"],
+        preserve_numbers=settings["preserve_numbers"],
+    )
+
+
+def _tokenizer_settings(config: TokenizerConfig) -> TokenizerSettings:
+    return {
+        "version": config.version,
+        "unicode_normalization": config.unicode_normalization,
+        "casefold": config.casefold,
+        "accent_fold": config.accent_fold,
+        "preserve_identifiers": config.preserve_identifiers,
+        "preserve_numbers": config.preserve_numbers,
+    }
+
+
 def _cached_record(document: SourceDocument) -> CachedRecord:
     return {
         "record_id": document.record_id,
@@ -1115,6 +1382,10 @@ def _cached_record(document: SourceDocument) -> CachedRecord:
         "key_path": document.key_path,
         "aliases": list(document.aliases),
         "source_refs": [_cached_source_reference(reference) for reference in document.source_refs],
+        "evidence_refs": [
+            _cached_evidence_reference(reference)
+            for reference in document.evidence_refs
+        ],
     }
 
 
@@ -1129,6 +1400,7 @@ def _cache_payload(index: Bm25Index) -> CachePayload:
         "collection": index.collection,
         "k1": index.k1,
         "b": index.b,
+        "tokenizer": _tokenizer_settings(index.tokenizer),
         "document_lengths": dict(index.document_lengths),
         "avgdl": index.avgdl,
         "document_frequencies": dict(index.document_frequencies),
@@ -1188,6 +1460,13 @@ def _cache_integer(mapping: dict[str, JsonValue], field: str, path: Path) -> int
     return value
 
 
+def _cache_bool(mapping: dict[str, JsonValue], field: str, path: Path) -> bool:
+    value = mapping.get(field)
+    if type(value) is not bool:
+        raise _cache_validation_error(path, f"{field} must be a boolean")
+    return value
+
+
 def _cache_string_list(value: JsonValue, path: Path, label: str) -> list[str]:
     if type(value) is not list or not all(type(item) is str for item in value):
         raise _cache_validation_error(path, f"{label} must be an array of strings")
@@ -1207,6 +1486,18 @@ def _parse_cached_reference(value: JsonValue, path: Path) -> SourceReference:
     )
 
 
+def _parse_cached_evidence_reference(
+    value: JsonValue,
+    path: Path,
+) -> EvidenceReference:
+    raw = _cache_mapping(value, path, "evidence reference")
+    return EvidenceReference(
+        kind=_cache_string(raw, "kind", path),
+        ref=_cache_string(raw, "ref", path),
+        note=_cache_optional_string(raw, "note", path),
+    )
+
+
 def _parse_cached_record(record_id: str, value: JsonValue, path: Path) -> SourceDocument:
     raw = _cache_mapping(value, path, f"records.{record_id}")
     cached_record_id = _cache_string(raw, "record_id", path)
@@ -1215,6 +1506,9 @@ def _parse_cached_record(record_id: str, value: JsonValue, path: Path) -> Source
     references_raw = raw.get("source_refs")
     if type(references_raw) is not list:
         raise _cache_validation_error(path, f"records.{record_id}.source_refs must be an array")
+    evidence_references_raw = raw.get("evidence_refs")
+    if type(evidence_references_raw) is not list:
+        raise _cache_validation_error(path, f"records.{record_id}.evidence_refs must be an array")
     return SourceDocument(
         record_id=record_id,
         collection=_cache_string(raw, "collection", path),
@@ -1225,6 +1519,10 @@ def _parse_cached_record(record_id: str, value: JsonValue, path: Path) -> Source
         key_path=_cache_optional_string(raw, "key_path", path),
         aliases=tuple(_cache_string_list(raw.get("aliases"), path, f"records.{record_id}.aliases")),
         source_refs=tuple(_parse_cached_reference(reference, path) for reference in references_raw),
+        evidence_refs=tuple(
+            _parse_cached_evidence_reference(reference, path)
+            for reference in evidence_references_raw
+        ),
     )
 
 
@@ -1272,6 +1570,31 @@ def _parse_term_aliases(value: JsonValue, path: Path) -> dict[str, tuple[str, ..
     }
 
 
+def _parse_cached_tokenizer(value: JsonValue, path: Path) -> TokenizerConfig:
+    raw = _cache_mapping(value, path, "tokenizer")
+    normalization = _NORMALIZATION_BY_NAME.get(
+        _cache_string(raw, "unicode_normalization", path)
+    )
+    if normalization is None:
+        raise _cache_validation_error(
+            path,
+            "tokenizer.unicode_normalization is invalid",
+        )
+    accent_fold = _ACCENT_FOLD_BY_NAME.get(
+        _cache_string(raw, "accent_fold", path)
+    )
+    if accent_fold is None:
+        raise _cache_validation_error(path, "tokenizer.accent_fold is invalid")
+    return TokenizerConfig(
+        version=_cache_string(raw, "version", path),
+        unicode_normalization=normalization,
+        casefold=_cache_bool(raw, "casefold", path),
+        accent_fold=accent_fold,
+        preserve_identifiers=_cache_bool(raw, "preserve_identifiers", path),
+        preserve_numbers=_cache_bool(raw, "preserve_numbers", path),
+    )
+
+
 def _parse_cache(value: JsonValue, path: Path) -> Bm25Index:
     raw = _cache_mapping(value, path, "cache")
     records_raw = _cache_mapping(raw.get("records"), path, "records")
@@ -1312,6 +1635,7 @@ def _parse_cache(value: JsonValue, path: Path) -> Bm25Index:
         collection=_cache_string(raw, "collection", path),
         k1=_cache_float(raw, "k1", path),
         b=_cache_float(raw, "b", path),
+        tokenizer=_parse_cached_tokenizer(raw.get("tokenizer"), path),
         fingerprints=fingerprints,
         document_lengths=document_lengths,
         avgdl=avgdl,
@@ -1375,22 +1699,51 @@ def _write_cache(path: Path, index: Bm25Index) -> None:
 
 
 def _index_config(request: IndexRequest) -> Bm25Config:
+    alias_settings = request.profile["aliases"]
+    max_expansions = alias_settings["max_expansions"]
+    term_aliases = request.profile["term_aliases"] if alias_settings["enabled"] else {}
     return Bm25Config(
         collection=request.collection,
         k1=request.profile["bm25"]["k1"],
         b=request.profile["bm25"]["b"],
+        tokenizer=_tokenizer_config(request.profile["tokenizer"]),
         term_aliases=tuple(
-            (term, tuple(expansions))
-            for term, expansions in sorted(request.profile["term_aliases"].items())
+            (term, tuple(expansions[:max_expansions]))
+            for term, expansions in sorted(term_aliases.items())
+            if max_expansions > 0
         ),
     )
 
 
+def _cache_path(request: IndexRequest) -> Path:
+    configured = Path(request.profile["cache"])
+    if configured.is_absolute() or ".." in configured.parts:
+        raise _cache_validation_error(
+            configured,
+            "cache path must be relative and stay within project_root",
+        )
+    try:
+        project_root = request.project_root.resolve()
+        cache_path = (request.project_root / configured).resolve()
+        cache_path.relative_to(project_root)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise _cache_validation_error(
+            configured,
+            "cache path must be relative and stay within project_root",
+        ) from error
+    if cache_path == project_root:
+        raise _cache_validation_error(
+            configured,
+            "cache path must be relative and stay within project_root",
+        )
+    return cache_path
+
+
 def load_or_build_index(request: IndexRequest) -> IndexLoadResult:
+    cache_path = _cache_path(request)
     sources = _configured_sources(request)
     fingerprints = _index_fingerprints(request, sources)
-    configured_cache = Path(request.profile["cache"])
-    cache_path = configured_cache if configured_cache.is_absolute() else request.project_root / configured_cache
+    config = _index_config(request)
     reason: CacheReason
     if request.force_reindex:
         reason = "forced"
@@ -1405,8 +1758,10 @@ def load_or_build_index(request: IndexRequest) -> IndexLoadResult:
             if (
                 cached.collection == request.collection
                 and cached.fingerprints == fingerprints
-                and cached.k1 == request.profile["bm25"]["k1"]
-                and cached.b == request.profile["bm25"]["b"]
+                and cached.k1 == config.k1
+                and cached.b == config.b
+                and cached.tokenizer == config.tokenizer
+                and cached.term_aliases == _alias_mapping(config)
             ):
                 return IndexLoadResult(
                     index=cached,
@@ -1417,7 +1772,7 @@ def load_or_build_index(request: IndexRequest) -> IndexLoadResult:
             reason = "stale"
 
     documents = _ingest_configured_sources(request, sources)
-    index = build_index(documents, _index_config(request), fingerprints)
+    index = build_index(documents, config, fingerprints)
     _write_cache(cache_path, index)
     return IndexLoadResult(
         index=index,

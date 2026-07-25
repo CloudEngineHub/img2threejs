@@ -28,7 +28,9 @@ ProfileValidationError = SPEC_SEARCH_MODULE.ProfileValidationError
 UnknownCollectionError = SPEC_SEARCH_MODULE.UnknownCollectionError
 Bm25Config = SPEC_SEARCH_MODULE.Bm25Config
 CacheWriteError = SPEC_SEARCH_MODULE.CacheWriteError
+CacheValidationError = SPEC_SEARCH_MODULE.CacheValidationError
 IndexRequest = SPEC_SEARCH_MODULE.IndexRequest
+SearchOutputRequest = SPEC_SEARCH_MODULE.SearchOutputRequest
 SourceDocument = SPEC_SEARCH_MODULE.SourceDocument
 build_index = SPEC_SEARCH_MODULE.build_index
 ingest_source_tree = SPEC_SEARCH_MODULE.ingest_source_tree
@@ -37,6 +39,7 @@ load_jsonl_records = SPEC_SEARCH_MODULE.load_jsonl_records
 load_profile = SPEC_SEARCH_MODULE.load_profile
 load_profiles = SPEC_SEARCH_MODULE.load_profiles
 search_index = SPEC_SEARCH_MODULE.search_index
+serialize_search_results = SPEC_SEARCH_MODULE.serialize_search_results
 tokenize = SPEC_SEARCH_MODULE.tokenize
 
 
@@ -95,11 +98,20 @@ def write_jsonl(path, records):
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
-def make_profile(tokenizer_version="1", k1=1.5):
+def make_profile(
+    tokenizer_version="1",
+    k1=1.5,
+    *,
+    casefold=True,
+    cache=".cache/spec-search/fixture.json",
+    aliases_enabled=True,
+    term_aliases=None,
+):
     return {
         "source_roots": ["specs"],
+        "optional_source_roots": [],
         "distilled_records": [],
-        "cache": ".cache/spec-search/fixture.json",
+        "cache": cache,
         "documentation": "README.md",
         "encoding": "utf-8",
         "languages": ["en", "vi"],
@@ -107,15 +119,14 @@ def make_profile(tokenizer_version="1", k1=1.5):
         "tokenizer": {
             "version": tokenizer_version,
             "unicode_normalization": "NFKC",
-            "casefold": True,
+            "casefold": casefold,
             "accent_fold": "vi",
             "preserve_identifiers": True,
             "preserve_numbers": True,
-            "stemming": False,
         },
-        "aliases": {"mode": "conservative", "enabled": True, "max_expansions": 1},
+        "aliases": {"enabled": aliases_enabled, "max_expansions": 1},
         "bm25": {"k1": k1, "b": 0.75},
-        "term_aliases": {},
+        "term_aliases": {} if term_aliases is None else term_aliases,
     }
 
 
@@ -127,7 +138,7 @@ def write_fixture_source(root, content="# Safety ring\nKarambit retention compon
     return source
 
 
-def write_cli_fixture(root, *, malformed_profile=False):
+def write_cli_fixture(root, *, malformed_profile=False, include_raw_roots=True):
     shared = root / "forge/_shared"
     intake = root / "forge/stage1_intake"
     shared.mkdir(parents=True, exist_ok=True)
@@ -136,32 +147,33 @@ def write_cli_fixture(root, *, malformed_profile=False):
     if SEARCH_SPECS_CLI.is_file():
         shutil.copyfile(SEARCH_SPECS_CLI, intake / "search_specs.py")
 
-    docs = root / "docs"
-    docs.mkdir(exist_ok=True)
-    long_section = (
-        " ".join(["alpha"] * 20)
-        + " earliestneedle "
-        + " ".join(["middle"] * 15)
-        + " needle "
-        + " ".join(["omega"] * 20)
-    )
-    (docs / "guide.md").write_text(
-        "# Knife Guide\n"
-        "General geometry.\n\n"
-        "## Safety Ring\n"
-        f"{long_section}\n\n"
-        "## Roughness\n"
-        "Roughness and độ nhám control the finish response.\n",
-        encoding="utf-8",
-    )
-    records = root / "records"
-    records.mkdir(exist_ok=True)
+    if include_raw_roots:
+        raw_docs = root / "docs/raw"
+        raw_docs.mkdir(parents=True, exist_ok=True)
+        long_section = (
+            " ".join(["alpha"] * 20)
+            + " earliestneedle "
+            + " ".join(["middle"] * 15)
+            + " needle "
+            + " ".join(["omega"] * 20)
+        )
+        (raw_docs / "guide.md").write_text(
+            "# Knife Guide\n"
+            "General geometry.\n\n"
+            "## Safety Ring\n"
+            f"{long_section}\n\n"
+            "## Roughness\n"
+            "Roughness and độ nhám control the finish response.\n",
+            encoding="utf-8",
+        )
+    records = root / "docs/specs/vocabulary"
+    records.mkdir(parents=True, exist_ok=True)
     duplicate_records = []
     for record_id in ("cs2.fixture.safety-a", "cs2.fixture.safety-b"):
         record = make_record()
         record["record_id"] = record_id
         record["content"] = "earliestneedle needle"
-        record["source_refs"] = [{"path": "docs/guide.md", "heading": "Safety Ring"}]
+        record["source_refs"] = [{"path": "docs/raw/guide.md", "heading": "Safety Ring"}]
         duplicate_records.append(record)
     write_jsonl(records / "cs2.jsonl", duplicate_records)
 
@@ -182,15 +194,15 @@ def write_cli_fixture(root, *, malformed_profile=False):
                         "accent_fold": "vi",
                         "preserve_identifiers": True,
                         "preserve_numbers": True,
-                        "stemming": False,
                     },
-                    "aliases": {"mode": "conservative", "enabled": True, "max_expansions": 1},
+                    "aliases": {"enabled": True, "max_expansions": 1},
                     "bm25": {"k1": 1.5, "b": 0.75},
                 },
                 "collections": {
                     "cs2": {
-                        "source_roots": ["docs"],
-                        "distilled_records": ["records/cs2.jsonl"],
+                        "source_roots": [],
+                        "optional_source_roots": ["docs/raw"],
+                        "distilled_records": ["docs/specs/vocabulary/cs2.jsonl"],
                         "documentation": "docs/README.md",
                         "cache": ".cache/spec-search/cs2.json",
                     }
@@ -202,8 +214,12 @@ def write_cli_fixture(root, *, malformed_profile=False):
     return intake / "search_specs.py"
 
 
-def run_cli_fixture(root, *arguments, malformed_profile=False):
-    cli = write_cli_fixture(root, malformed_profile=malformed_profile)
+def run_cli_fixture(root, *arguments, malformed_profile=False, include_raw_roots=True):
+    cli = write_cli_fixture(
+        root,
+        malformed_profile=malformed_profile,
+        include_raw_roots=include_raw_roots,
+    )
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(
@@ -418,6 +434,8 @@ class SourceIngestionTest(unittest.TestCase):
         self.assertEqual(profile["cache"], ".cache/spec-search/cs2.json")
         self.assertEqual(profile["documentation"], "docs/specs/vocabulary/README.md")
         self.assertEqual(profile["encoding"], "utf-8")
+        self.assertEqual(profile["source_roots"], [])
+        self.assertEqual(profile["optional_source_roots"], ["docs/cs2/", "docs/cs2-anatomy/"])
 
     def test_profile_loader_rejects_malformed_and_unknown_collections(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -471,6 +489,85 @@ class SourceIngestionTest(unittest.TestCase):
             documents = ingest_source_tree(root, "fixture", (".md", ".json"))
 
         self.assertEqual([document.file_path for document in documents], ["visible.md"])
+
+    def test_symlink_source_file_is_rejected_without_indexing_target(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_root = root / "specs"
+            source_root.mkdir()
+            secret = root / "secret.md"
+            secret.write_text("# Secret\nmust-not-be-indexed\n", encoding="utf-8")
+            (source_root / "linked.md").symlink_to(secret)
+            profile = make_profile()
+
+            with self.assertRaisesRegex(SourceIngestionError, r"linked\.md: symbolic links are not allowed"):
+                load_or_build_index(IndexRequest(root, "fixture", profile))
+
+            cache_exists = (root / ".cache/spec-search/fixture.json").exists()
+
+        self.assertFalse(cache_exists)
+
+    def test_symlink_source_root_is_rejected_without_indexing_target(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            secret_root = root / "secret"
+            secret_root.mkdir()
+            (secret_root / "secret.md").write_text(
+                "# Secret\nmust-not-be-indexed\n",
+                encoding="utf-8",
+            )
+            (root / "specs").symlink_to(secret_root, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                SourceIngestionError,
+                r"specs: symbolic links are not allowed",
+            ):
+                load_or_build_index(
+                    IndexRequest(root, "fixture", make_profile())
+                )
+
+            cache_exists = (root / ".cache/spec-search/fixture.json").exists()
+
+        self.assertFalse(cache_exists)
+
+    def test_missing_optional_root_is_skipped_but_required_root_is_not(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            records = root / "records"
+            records.mkdir()
+            write_jsonl(records / "fixture.jsonl", [make_record()])
+            optional_profile = make_profile()
+            optional_profile["source_roots"] = []
+            optional_profile["optional_source_roots"] = ["missing-raw"]
+            optional_profile["distilled_records"] = ["records/fixture.jsonl"]
+
+            loaded = load_or_build_index(IndexRequest(root, "fixture", optional_profile))
+
+            required_profile = make_profile(cache=".cache/spec-search/required.json")
+            with self.assertRaisesRegex(SourceIngestionError, r"specs: configured source root is not a directory"):
+                load_or_build_index(IndexRequest(root, "fixture", required_profile))
+
+        self.assertTrue(loaded.index.records)
+
+    def test_existing_unreadable_optional_root_raises_typed_source_error(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_root = root / "raw"
+            raw_root.mkdir()
+            profile = make_profile()
+            profile["source_roots"] = []
+            profile["optional_source_roots"] = ["raw"]
+
+            original_iterdir = Path.iterdir
+
+            def unreadable_iterdir(path):
+                if path == raw_root:
+                    raise PermissionError("denied")
+                return original_iterdir(path)
+
+            with mock.patch.object(Path, "iterdir", unreadable_iterdir):
+                with self.assertRaisesRegex(SourceIngestionError, r"raw: unable to read configured source root"):
+                    load_or_build_index(IndexRequest(root, "fixture", profile))
 
     def test_malformed_configured_json_and_jsonl_raise_named_errors(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -530,8 +627,113 @@ class BM25Test(unittest.TestCase):
         self.assertEqual([match.record.record_id for match in matches], ["fixture.a", "fixture.z"])
         self.assertEqual(matches[0].score, matches[1].score)
 
+    def test_profile_casefold_setting_changes_index_and_query_tokens(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_fixture_source(root, "# MixedCase\nCamelToken\n")
+
+            folded = load_or_build_index(IndexRequest(root, "fixture", make_profile()))
+            exact_case = load_or_build_index(
+                IndexRequest(
+                    root,
+                    "fixture",
+                    make_profile(casefold=False, cache=".cache/spec-search/exact.json"),
+                )
+            )
+
+        self.assertTrue(search_index(folded.index, "cameltoken"))
+        self.assertEqual(search_index(exact_case.index, "cameltoken"), [])
+        self.assertTrue(search_index(exact_case.index, "CamelToken"))
+
+    def test_enabled_term_alias_query_matches_expansion_and_disabled_does_not(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_fixture_source(root, "# Hook blade\nhookblade profile\n")
+            aliases = {"karambit": ["hookblade"]}
+
+            enabled = load_or_build_index(
+                IndexRequest(root, "fixture", make_profile(term_aliases=aliases))
+            )
+            disabled = load_or_build_index(
+                IndexRequest(
+                    root,
+                    "fixture",
+                    make_profile(
+                        cache=".cache/spec-search/no-alias.json",
+                        aliases_enabled=False,
+                        term_aliases=aliases,
+                    ),
+                )
+            )
+
+        self.assertTrue(search_index(enabled.index, "karambit"))
+        self.assertEqual(search_index(disabled.index, "karambit"), [])
+
 
 class CacheLifecycleTest(unittest.TestCase):
+    def test_notebooklm_evidence_refs_survive_cache_hit_and_cli_serialization(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            records = root / "records"
+            records.mkdir()
+            record = make_record()
+            record["evidence_refs"] = [
+                {
+                    "kind": "notebooklm",
+                    "ref": "notebook://cs2/source-7",
+                    "note": "distilled observation",
+                }
+            ]
+            write_jsonl(records / "fixture.jsonl", [record])
+            profile = make_profile()
+            profile["source_roots"] = []
+            profile["distilled_records"] = ["records/fixture.jsonl"]
+
+            load_or_build_index(IndexRequest(root, "fixture", profile))
+            cached = load_or_build_index(IndexRequest(root, "fixture", profile))
+            serialized = serialize_search_results(
+                cached.index,
+                SearchOutputRequest("retention ring", 1, 120),
+            )
+
+        self.assertEqual(cached.status, "hit")
+        self.assertEqual(
+            serialized[0]["evidence_refs"],
+            [
+                {
+                    "kind": "notebooklm",
+                    "ref": "notebook://cs2/source-7",
+                    "note": "distilled observation",
+                }
+            ],
+        )
+
+    def test_cache_path_rejects_traversal_and_absolute_values_before_write(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            outer = Path(temporary_directory)
+            root = outer / "project"
+            root.mkdir()
+            write_fixture_source(root)
+            scenarios = (
+                ("../escape.json", outer / "escape.json"),
+                (str(outer / "absolute.json"), outer / "absolute.json"),
+            )
+
+            for configured_cache, escaped_path in scenarios:
+                with self.subTest(configured_cache=configured_cache):
+                    with self.assertRaisesRegex(
+                        CacheValidationError,
+                        r"cache path must be relative and stay within project_root",
+                    ):
+                        load_or_build_index(
+                            IndexRequest(
+                                root,
+                                "fixture",
+                                make_profile(cache=configured_cache),
+                            )
+                        )
+                    self.assertFalse(escaped_path.exists())
+
     def test_cache_hit_avoids_source_reparse_and_preserves_fingerprint(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -594,7 +796,11 @@ class CacheLifecycleTest(unittest.TestCase):
             tokenizer_changed = load_or_build_index(
                 IndexRequest(root, "fixture", make_profile(tokenizer_version="2", k1=1.2))
             )
-            with mock.patch.object(SPEC_SEARCH_MODULE, "_CACHE_SCHEMA_VERSION", 2):
+            with mock.patch.object(
+                SPEC_SEARCH_MODULE,
+                "_CACHE_SCHEMA_VERSION",
+                SPEC_SEARCH_MODULE._CACHE_SCHEMA_VERSION + 1,
+            ):
                 schema_changed = load_or_build_index(
                     IndexRequest(root, "fixture", make_profile(tokenizer_version="2", k1=1.2))
                 )
@@ -663,6 +869,24 @@ class CacheLifecycleTest(unittest.TestCase):
 
 
 class CliOutputTest(unittest.TestCase):
+    def test_clean_style_project_searches_committed_distilled_records_without_raw_roots(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            result = run_cli_fixture(
+                root,
+                "retention",
+                "ring",
+                "--json",
+                include_raw_roots=False,
+            )
+            raw_root_exists = (root / "docs/raw").exists()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(raw_root_exists)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["matches"])
+        self.assertEqual(payload["matches"][0]["record_id"], "cs2.fixture.safety-a")
+
     def test_json_output_has_stable_machine_consumed_shape(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             result = run_cli_fixture(
@@ -696,11 +920,13 @@ class CliOutputTest(unittest.TestCase):
                     "score",
                     "snippets",
                     "source_refs",
+                    "evidence_refs",
                 }.issubset(match)
             )
             self.assertIsInstance(match["score"], float)
             self.assertIsInstance(match["snippets"], list)
             self.assertIsInstance(match["source_refs"], list)
+            self.assertIsInstance(match["evidence_refs"], list)
         self.assertEqual(result.stderr, "")
 
     def test_human_output_is_nonempty_and_stable_on_cache_hits(self):
