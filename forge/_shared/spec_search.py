@@ -226,6 +226,23 @@ class SearchMatch:
     score: float
 
 
+class SerializedSearchMatch(TypedDict):
+    record_id: str
+    file_path: str
+    heading: str | None
+    key_path: str | None
+    score: float
+    snippets: list[str]
+    source_refs: list[CachedSourceReference]
+
+
+@dataclass(frozen=True, slots=True)
+class SearchOutputRequest:
+    query: str
+    limit: int
+    snippet_chars: int
+
+
 @dataclass(frozen=True, slots=True)
 class IndexRequest:
     project_root: Path
@@ -866,6 +883,112 @@ def search_index(index: Bm25Index, query: str) -> list[SearchMatch]:
         if score > 0
     ]
     return sorted(matches, key=lambda match: (-match.score, match.record.record_id))
+
+
+def _earliest_token_offset(text: str, query: str) -> int:
+    query_tokens = frozenset(tokenize(query))
+    for token_match in _TOKEN_PATTERN.finditer(text):
+        if query_tokens.intersection(tokenize(token_match.group(0))):
+            return token_match.start()
+    return 0
+
+
+def _trim_word_boundaries(text: str, start: int, end: int) -> tuple[int, int]:
+    if start > 0:
+        next_space = text.find(" ", start, end)
+        if next_space >= 0:
+            start = next_space + 1
+    if end < len(text):
+        previous_space = text.rfind(" ", start, end)
+        if previous_space > start:
+            end = previous_space
+    return start, end
+
+
+def section_snippet(text: str, query: str, max_chars: int) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    if max_chars <= 3:
+        return "." * max_chars
+    suffix_capacity = max_chars - 4
+    target = _earliest_token_offset(normalized, query)
+    if target <= suffix_capacity // 2:
+        raw_start, raw_end = 0, suffix_capacity
+    else:
+        body_capacity = max(1, max_chars - 8)
+        raw_start = max(0, target - body_capacity // 2)
+        raw_end = min(len(normalized), raw_start + body_capacity)
+        if raw_end == len(normalized):
+            raw_start = max(0, len(normalized) - suffix_capacity)
+    start, end = _trim_word_boundaries(normalized, raw_start, raw_end)
+    prefix = "... " if start > 0 else ""
+    suffix = " ..." if end < len(normalized) else ""
+    return f"{prefix}{normalized[start:end].strip()}{suffix}"[:max_chars]
+
+
+def _document_key(document: SourceDocument) -> tuple[str, str | None, str | None]:
+    return document.file_path, document.heading, document.key_path
+
+
+def _reference_key(reference: SourceReference) -> tuple[str, str | None, str | None]:
+    return reference.path, reference.heading, reference.key_path
+
+
+def _resolve_source_section(
+    match: SearchMatch,
+    sections: Mapping[tuple[str, str | None, str | None], SourceDocument],
+) -> tuple[tuple[str, str | None, str | None], str]:
+    own_key = _document_key(match.record)
+    if match.record.heading is not None or match.record.key_path is not None:
+        return own_key, match.record.content
+    for reference in match.record.source_refs:
+        key = _reference_key(reference)
+        source_document = sections.get(key)
+        if source_document is not None:
+            return key, source_document.content
+    if match.record.source_refs:
+        return _reference_key(match.record.source_refs[0]), match.record.content
+    return own_key, match.record.content
+
+
+def serialize_search_results(
+    index: Bm25Index,
+    request: SearchOutputRequest,
+) -> list[SerializedSearchMatch]:
+    sections = {
+        _document_key(document): document
+        for document in sorted(index.records.values(), key=lambda item: item.record_id)
+    }
+    results: list[SerializedSearchMatch] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for match in search_index(index, request.query):
+        section_key, source_text = _resolve_source_section(match, sections)
+        if section_key in seen:
+            continue
+        seen.add(section_key)
+        file_path, heading, key_path = section_key
+        results.append(
+            {
+                "record_id": match.record.record_id,
+                "file_path": file_path,
+                "heading": heading,
+                "key_path": key_path,
+                "score": round(match.score, 12),
+                "snippets": [section_snippet(source_text, request.query, request.snippet_chars)],
+                "source_refs": [
+                    {
+                        "path": reference.path,
+                        "heading": reference.heading,
+                        "key_path": reference.key_path,
+                    }
+                    for reference in match.record.source_refs
+                ],
+            }
+        )
+        if len(results) == request.limit:
+            break
+    return results
 
 
 def _hidden_source(relative: Path) -> bool:

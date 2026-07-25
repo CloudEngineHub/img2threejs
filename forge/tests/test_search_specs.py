@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +16,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_SEARCH_PATH = ROOT / "forge/_shared/spec_search.py"
+SEARCH_SPECS_CLI = ROOT / "forge/stage1_intake/search_specs.py"
 SPEC_SEARCH_SPEC = importlib.util.spec_from_file_location("spec_search", SPEC_SEARCH_PATH)
 assert SPEC_SEARCH_SPEC is not None and SPEC_SEARCH_SPEC.loader is not None
 SPEC_SEARCH_MODULE = importlib.util.module_from_spec(SPEC_SEARCH_SPEC)
@@ -122,6 +125,95 @@ def write_fixture_source(root, content="# Safety ring\nKarambit retention compon
     source = source_root / "guide.md"
     source.write_text(content, encoding="utf-8")
     return source
+
+
+def write_cli_fixture(root, *, malformed_profile=False):
+    shared = root / "forge/_shared"
+    intake = root / "forge/stage1_intake"
+    shared.mkdir(parents=True, exist_ok=True)
+    intake.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(SPEC_SEARCH_PATH, shared / "spec_search.py")
+    if SEARCH_SPECS_CLI.is_file():
+        shutil.copyfile(SEARCH_SPECS_CLI, intake / "search_specs.py")
+
+    docs = root / "docs"
+    docs.mkdir(exist_ok=True)
+    long_section = (
+        " ".join(["alpha"] * 20)
+        + " earliestneedle "
+        + " ".join(["middle"] * 15)
+        + " needle "
+        + " ".join(["omega"] * 20)
+    )
+    (docs / "guide.md").write_text(
+        "# Knife Guide\n"
+        "General geometry.\n\n"
+        "## Safety Ring\n"
+        f"{long_section}\n\n"
+        "## Roughness\n"
+        "Roughness and độ nhám control the finish response.\n",
+        encoding="utf-8",
+    )
+    records = root / "records"
+    records.mkdir(exist_ok=True)
+    duplicate_records = []
+    for record_id in ("cs2.fixture.safety-a", "cs2.fixture.safety-b"):
+        record = make_record()
+        record["record_id"] = record_id
+        record["content"] = "earliestneedle needle"
+        record["source_refs"] = [{"path": "docs/guide.md", "heading": "Safety Ring"}]
+        duplicate_records.append(record)
+    write_jsonl(records / "cs2.jsonl", duplicate_records)
+
+    if malformed_profile:
+        profile_text = '{"profile_schema_version":1,"defaults":{}}'
+    else:
+        profile_text = json.dumps(
+            {
+                "profile_schema_version": 1,
+                "defaults": {
+                    "encoding": "utf-8",
+                    "languages": ["en", "vi"],
+                    "source_extensions": [".md", ".json", ".jsonl"],
+                    "tokenizer": {
+                        "version": "1",
+                        "unicode_normalization": "NFKC",
+                        "casefold": True,
+                        "accent_fold": "vi",
+                        "preserve_identifiers": True,
+                        "preserve_numbers": True,
+                        "stemming": False,
+                    },
+                    "aliases": {"mode": "conservative", "enabled": True, "max_expansions": 1},
+                    "bm25": {"k1": 1.5, "b": 0.75},
+                },
+                "collections": {
+                    "cs2": {
+                        "source_roots": ["docs"],
+                        "distilled_records": ["records/cs2.jsonl"],
+                        "documentation": "docs/README.md",
+                        "cache": ".cache/spec-search/cs2.json",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        )
+    (shared / "spec_search_profiles.json").write_text(profile_text, encoding="utf-8")
+    return intake / "search_specs.py"
+
+
+def run_cli_fixture(root, *arguments, malformed_profile=False):
+    cli = write_cli_fixture(root, malformed_profile=malformed_profile)
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return subprocess.run(
+        [sys.executable, str(cli), *arguments],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def load_contract_fixture(path):
@@ -568,6 +660,154 @@ class CacheLifecycleTest(unittest.TestCase):
 
         self.assertEqual(preserved_cache, old_cache)
         self.assertEqual(temporary_artifacts, [])
+
+
+class CliOutputTest(unittest.TestCase):
+    def test_json_output_has_stable_machine_consumed_shape(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = run_cli_fixture(
+                Path(temporary_directory),
+                "--collection",
+                "cs2",
+                "safety",
+                "ring",
+                "vòng",
+                "ngón",
+                "--limit",
+                "2",
+                "--json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(set(payload), {"query", "collection", "index", "matches"})
+        self.assertEqual(payload["query"], "safety ring vòng ngón")
+        self.assertEqual(payload["collection"], "cs2")
+        self.assertEqual(set(payload["index"]), {"cache_path", "fingerprint", "reason", "status"})
+        self.assertLessEqual(len(payload["matches"]), 2)
+        self.assertTrue(payload["matches"])
+        for match in payload["matches"]:
+            self.assertTrue(
+                {
+                    "record_id",
+                    "file_path",
+                    "heading",
+                    "key_path",
+                    "score",
+                    "snippets",
+                    "source_refs",
+                }.issubset(match)
+            )
+            self.assertIsInstance(match["score"], float)
+            self.assertIsInstance(match["snippets"], list)
+            self.assertIsInstance(match["source_refs"], list)
+        self.assertEqual(result.stderr, "")
+
+    def test_human_output_is_nonempty_and_stable_on_cache_hits(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_cli_fixture(root, "roughness", "độ", "nhám")
+            cached = run_cli_fixture(root, "roughness", "độ", "nhám")
+            repeated = run_cli_fixture(root, "roughness", "độ", "nhám")
+
+        self.assertEqual(cached.returncode, 0, cached.stderr)
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertTrue(cached.stdout.strip())
+        self.assertEqual(cached.stdout, repeated.stdout)
+
+    def test_validation_and_profile_errors_have_documented_codes(self):
+        scenarios = (
+            (("--json",), 2, "empty_query", False),
+            (("--collection", "missing", "term", "--json"), 2, "unknown_collection", False),
+            (("term", "--limit", "0", "--json"), 2, "invalid_limit", False),
+            (("term", "--json"), 3, "profile_failure", True),
+        )
+        for arguments, expected_exit, expected_code, malformed_profile in scenarios:
+            with self.subTest(arguments=arguments):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    result = run_cli_fixture(
+                        Path(temporary_directory),
+                        *arguments,
+                        malformed_profile=malformed_profile,
+                    )
+
+                self.assertEqual(result.returncode, expected_exit, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(
+                    set(payload),
+                    {"query", "collection", "index", "matches", "error"},
+                )
+                self.assertEqual(payload["error"]["code"], expected_code)
+                self.assertIsInstance(payload["error"]["message"], str)
+
+    def test_no_match_is_success_with_empty_matches(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = run_cli_fixture(
+                Path(temporary_directory),
+                "term-that-cannot-match",
+                "--json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["matches"], [])
+
+    def test_undersized_snippets_are_rejected_before_search(self):
+        for snippet_chars in range(1, 5):
+            with self.subTest(snippet_chars=snippet_chars):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    result = run_cli_fixture(
+                        Path(temporary_directory),
+                        "roughness",
+                        "--snippet-chars",
+                        str(snippet_chars),
+                        "--json",
+                    )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["error"]["code"], "invalid_snippet_chars")
+                self.assertIn("at least 5", payload["error"]["message"])
+                self.assertEqual(payload["matches"], [])
+
+
+class SnippetTest(unittest.TestCase):
+    def test_snippet_is_bounded_centered_and_word_trimmed(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = run_cli_fixture(
+                Path(temporary_directory),
+                "earliestneedle",
+                "needle",
+                "--limit",
+                "5",
+                "--snippet-chars",
+                "80",
+                "--json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        matches = json.loads(result.stdout)["matches"]
+        self.assertEqual(len(matches), 1)
+        snippet = matches[0]["snippets"][0]
+        self.assertLessEqual(len(snippet), 80)
+        self.assertIn("earliestneedle", snippet)
+        self.assertTrue(snippet.startswith("... "))
+        self.assertTrue(snippet.endswith(" ..."))
+        body_words = snippet.removeprefix("... ").removesuffix(" ...").split()
+        self.assertTrue(set(body_words) <= {"alpha", "earliestneedle", "middle", "needle", "omega"})
+
+    def test_untruncated_snippet_has_no_ellipses(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = run_cli_fixture(
+                Path(temporary_directory),
+                "roughness",
+                "--snippet-chars",
+                "250",
+                "--json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        snippet = json.loads(result.stdout)["matches"][0]["snippets"][0]
+        self.assertNotIn("...", snippet)
 
 
 if __name__ == "__main__":
