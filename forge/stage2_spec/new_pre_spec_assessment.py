@@ -93,6 +93,7 @@ CS2_INTENT_KEYWORDS = (
     "cs2", "csgo", "counter-strike", "counter strike", "weapon skin", "knife skin", "glove skin",
     "doppler", "gamma doppler", "marble fade", "case hardened", "fade",
     "karambit", "butterfly knife", "bayonet", "gut knife", "falchion", "bowie knife",
+    "classic knife",
 )
 
 DEFAULT_SPEC_SEARCH_LIMIT: Final = 3
@@ -169,6 +170,7 @@ def make_payload(
     image: str | None,
     complexity: str,
     is_cs2: bool = False,
+    manifest: dict | None = None,
 ) -> PreSpecPayload:
     assessment = make_pre_spec_assessment(target_name)
     contract = make_quality_contract()
@@ -200,6 +202,23 @@ def make_payload(
             "and unknowns before generating or implementing ObjectSculptSpec."
         ),
     }
+    if manifest is not None:
+        intake = {
+            "schemaVersion": manifest.get("schemaVersion"),
+            "itemFamily": manifest.get("itemFamily"),
+            "subtype": manifest.get("subtype"),
+            "route": manifest.get("route"),
+            "exactnessTier": manifest.get("exactnessTier"),
+            "confidence": manifest.get("confidence", {}),
+            "provenance": manifest.get("provenance", {}),
+            "warnings": manifest.get("warnings", []),
+        }
+        payload["cs2Intake"] = intake
+        payload["preSpecAssessment"]["cs2Intake"] = intake
+        payload["preSpecAssessment"]["objectClass"]["itemFamily"] = manifest.get("itemFamily")
+        payload["preSpecAssessment"]["objectClass"]["subtype"] = manifest.get("subtype")
+        payload["preSpecAssessment"]["objectClass"]["route"] = manifest.get("route")
+        payload["preSpecAssessment"]["objectClass"]["exactnessTier"] = manifest.get("exactnessTier")
     return payload
 
 
@@ -222,6 +241,7 @@ def main(argv: list[str]) -> int:
         help=f"CS2 weapon/knife/glove skin -- defaults complexity to ultra-complex (targetMinDetails 16); "
              f"never below the {CS2_DETAIL_MINIMUM} floor even if --complexity is set lower.",
     )
+    parser.add_argument("--manifest", type=Path, help="CS2 intake manifest")
     parser.add_argument(
         "--collection",
         help="Spec-search collection; defaults to cs2 for CS2 targets and core_3d otherwise.",
@@ -241,7 +261,15 @@ def main(argv: list[str]) -> int:
 
     is_cs2 = args.cs2 or detect_cs2_intent(args.target_name)
     complexity = args.complexity or ("ultra-complex" if is_cs2 else "moderate")
-    payload_object = make_payload(args.target_name, args.image, complexity, args.cs2)
+    manifest = None
+    if args.manifest:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            parser.error("CS2 intake manifest must be a JSON object")
+        if manifest.get("state") not in {"proceed", "fallback"}:
+            parser.error(f"CS2 intake is not ready for assessment: {manifest.get('state', 'unknown')}")
+        is_cs2 = True
+    payload_object = make_payload(args.target_name, args.image, complexity, is_cs2, manifest)
     collection = select_spec_collection(args.target_name, args.collection)
     try:
         payload_object["localSpecSearch"] = search_local_specs(

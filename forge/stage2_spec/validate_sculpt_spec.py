@@ -52,6 +52,8 @@ VALID_TOPOLOGY_CLASSES = {
     "fiber-strand",
     "material-only",
 }
+CS2_ROUTES = {"reference-projection", "authored-texture", "procedural-finish"}
+CS2_EXACTNESS_TIERS = {"image-only", "metadata-assisted", "exact-texture"}
 # Plan 1.3 Workstream A: primitives that are structurally wrong for a given topology class.
 # Prevents "Flat-Projection Bias" (e.g. a continuous organic bulge picked as a box-stack).
 DISALLOWED_TOPOLOGY_PRIMITIVE_PAIRS: dict[str, set[str]] = {
@@ -417,6 +419,39 @@ def validate_cs2_view_dependent_environment(spec: dict[str, Any], errors: list[s
             "code-generated default environment or supply a user HDRI before generating "
             "(see grimoire/build/cs2_finishes.md)"
         )
+
+
+def validate_cs2_contract(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
+    intake = spec.get("cs2Intake")
+    if intake is None:
+        return
+    if not isinstance(intake, dict):
+        errors.append("cs2Intake must be an object")
+        return
+    route = intake.get("route")
+    tier = intake.get("exactnessTier")
+    if route not in CS2_ROUTES:
+        errors.append("cs2Intake.route must be a supported CS2 route")
+    if tier not in CS2_EXACTNESS_TIERS:
+        errors.append("cs2Intake.exactnessTier must be a supported exactness tier")
+    if intake.get("itemFamily") != "knife":
+        errors.append("cs2Intake requires the registered knife adapter")
+    if route == "reference-projection":
+        camera = spec.get("referenceCamera")
+        source = intake.get("deLitAlbedo") or intake.get("sourceImage")
+        if not isinstance(camera, dict) or camera.get("solved") is not True:
+            warnings.append("quality: reference-projection needs solved referenceCamera")
+        if not isinstance(source, str) or not source.strip():
+            errors.append("reference-projection requires a de-lit source image")
+    if route == "authored-texture":
+        materials = [item for item in spec.get("materials", []) if isinstance(item, dict)]
+        pbr = next((item.get("referencePbr") for item in materials if item.get("id") == "skin-finish"), None)
+        maps = pbr.get("maps") if isinstance(pbr, dict) else None
+        required = ("albedo", "normal", "roughness", "metalness")
+        if tier == "exact-texture" and (not isinstance(maps, dict) or not all(key in maps for key in required)):
+            errors.append("exact-texture authored route requires independent albedo, normal, roughness, and metalness maps")
+    if route == "procedural-finish" and tier == "exact-texture":
+        errors.append("procedural-finish cannot claim exact-texture")
 
 
 def validate_materials(spec: dict[str, Any], errors: list[str], warnings: list[str]) -> set[str]:
@@ -1869,6 +1904,7 @@ def validate_spec(spec: dict[str, Any]) -> tuple[list[str], list[str]]:
     validate_look_dev_targets(spec, errors, warnings)
     evidence_ids = validate_evidence(spec, errors, warnings)
     material_ids = validate_materials(spec, errors, warnings)
+    validate_cs2_contract(spec, errors, warnings)
     validate_cs2_view_dependent_environment(spec, errors)
     validate_components(spec, material_ids, evidence_ids, errors, warnings)
     lod_plan = spec.get("lodPlan")

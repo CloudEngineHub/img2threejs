@@ -37,7 +37,9 @@
       ],
       "distilled_records": [
         "docs/specs/vocabulary/cs2.jsonl",
-        "docs/specs/vocabulary/core_3d.jsonl"
+        "docs/specs/vocabulary/cs2_reconstruction.jsonl",
+        "docs/specs/vocabulary/core_3d.jsonl",
+        "docs/specs/vocabulary/core_3d_reconstruction.jsonl"
       ],
       "documentation": "docs/specs/vocabulary/README.md",
       "cache": ".cache/spec-search/cs2.json"
@@ -46,7 +48,8 @@
       "source_roots": [],
       "optional_source_roots": [],
       "distilled_records": [
-        "docs/specs/vocabulary/core_3d.jsonl"
+        "docs/specs/vocabulary/core_3d.jsonl",
+        "docs/specs/vocabulary/core_3d_reconstruction.jsonl"
       ],
       "documentation": "docs/specs/vocabulary/README.md",
       "cache": ".cache/spec-search/core_3d.json"

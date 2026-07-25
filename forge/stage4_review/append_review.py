@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_shared"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from feature_acceptance_policy import feature_gate_failures
+from cs2_review import load_review_scene
 
 
 VALID_ACTIONS = {"continue", "refine-spec", "refine-code", "request-input", "stop"}
@@ -222,6 +224,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--camera-view", help="Camera/viewpoint label, e.g. front, three-quarter, side, close-up")
     parser.add_argument("--visual-notes", help="Short notes from screenshot comparison")
     parser.add_argument(
+        "--cs2-review-json",
+        help="Machine-readable CS2 review report JSON or a JSON file path",
+    )
+    parser.add_argument(
+        "--review-scene-json",
+        help="Versioned CS2 review-scene metadata JSON used to validate the report",
+    )
+    parser.add_argument(
         "--require-screenshot-files",
         action="store_true",
         help="Require local screenshot paths to exist before writing the review",
@@ -307,6 +317,24 @@ def main(argv: list[str]) -> int:
                     + ", ".join(missing_layers)
                 )
 
+    cs2_review = load_json_argument(args.cs2_review_json, "--cs2-review-json")
+    if cs2_review is not None:
+        if not isinstance(cs2_review, dict):
+            raise ValueError("--cs2-review-json must be a JSON object")
+        if args.review_scene_json:
+            scene_path = Path(args.review_scene_json).expanduser()
+            if not scene_path.is_file():
+                raise FileNotFoundError(f"--review-scene-json does not exist: {scene_path}")
+            scene = load_review_scene(scene_path)
+            expected = scene.get("fixtureId")
+            if cs2_review.get("reviewScene", {}).get("fixtureId") != expected:
+                raise ValueError("CS2 review report does not match --review-scene-json")
+        if args.action == "continue" and cs2_review.get("verdict") != "pass":
+            raise ValueError(
+                "CS2 review gate is blocking continuation: "
+                + ", ".join(str(item) for item in cs2_review.get("failedGates", []))
+            )
+
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "passId": args.pass_id,
@@ -323,6 +351,8 @@ def main(argv: list[str]) -> int:
         "codeFixes": split_items(args.code_fixes),
         "evidence": split_items(args.evidence),
     }
+    if cs2_review is not None:
+        entry["cs2Review"] = cs2_review
     if args.pass_id in VISUAL_PASS_IDS and args.action == "continue":
         feature_failures = feature_gate_failures(spec, entry, args.pass_id)
         if feature_failures:

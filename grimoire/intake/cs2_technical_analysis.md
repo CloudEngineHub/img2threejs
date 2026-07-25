@@ -25,6 +25,21 @@ CS2 items rely heavily on wear and tear (Float values). Identify:
 *   **Patina/Rust:** Oxidation changing Base Color, dropping Metalness to `0.0`, and spiking Roughness to `0.8+`.
 *   **Scratches/Dents:** High-frequency normal map alterations.
 
+## Review hand-off
+
+Use `forge/tests/fixtures/knife_review_scene.json` as the versioned review-scene
+contract. It owns the camera, environment hash, exposure, tone mapping, resolution,
+background, renderer version, and calibrated knife thresholds. The report from
+`forge/stage4_review/cs2_review.py` must preserve family identity, route, exactness
+tier, painted-region scores, projection coverage, critical identity-detail scores,
+per-region confidence, hidden-region confidence, and approximation notes.
+
+The initial fixture is user-supplied and marked `user-supplied-review-required`
+until rights provenance is verified. No extracted Valve texture may be committed or
+used to imply an exact-texture result. A single-view result may proceed only when
+visible identity features and the two orbit checks pass; hidden regions remain
+inferred and confidence-labeled.
+
 ---
 
 ## Required JSON Output Schema

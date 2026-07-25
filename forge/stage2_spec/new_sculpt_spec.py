@@ -677,18 +677,28 @@ def _cs2node(cid, name, primitive, position, scale, material, role, level,
                   local_features=local_features or [], evidence=["full-object"])
 
 
-def make_cs2_component_tree() -> list:
+CS2_KNIFE_SUBTYPES = frozenset(
+    {"karambit", "butterfly", "bayonet", "m9", "flip", "gut", "falchion", "bowie", "navaja",
+     "talon", "classic"}
+)
+
+
+def make_cs2_component_tree(item_family: str = "knife", subtype: str | None = None) -> list:
+    if item_family != "knife":
+        raise ValueError(f"unsupported CS2 family {item_family!r}; only knife is implemented")
+    if subtype and subtype not in CS2_KNIFE_SUBTYPES:
+        raise ValueError(f"unsupported CS2 knife subtype {subtype!r}")
     # Root is an organizing group only: use the invisible 'hidden' material (opacity 0) exactly
     # like the character template, so the generator's per-component mesh for root never renders as
     # a stray box over the weapon -- no generic generator change needed.
     root = _cnode("root", "Weapon (root)", "box", None, (0, 0, 0), (1, 1, 1),
                   material="hidden", role="body", level="macro", importance=1.0, anim_role="root")
     parts = [
-        _cs2node("blade", "Blade", "box", (0, 0.55, 0), (0.12, 1.1, 0.5), "skin-finish", "blade", "macro", 1.0,
+        _cs2node("blade", "Blade", "ground-blade", (0, 0.55, 0), (1.0, 1.0, 1.0), "skin-finish", "blade", "macro", 1.0,
                  ["edge bevel highlight", "engraved pattern swirl"]),
-        _cs2node("grip", "Grip", "box", (0, -0.55, 0), (0.16, 0.7, 0.22), "skin-finish", "grip", "macro", 0.9,
+        _cs2node("grip", "Grip", "curve-sweep", (0, -0.55, 0), (1.0, 1.0, 1.0), "skin-finish", "grip", "macro", 0.9,
                  ["checkered grip relief"]),
-        _cs2node("guard", "Guard", "box", (0, 0.0, 0), (0.5, 0.12, 0.3), "substrate", "guard", "meso", 0.7),
+        _cs2node("guard", "Guard", "extrude", (0, 0.0, 0), (1.0, 1.0, 1.0), "substrate", "guard", "meso", 0.7),
         _cs2node("pommel", "Pommel", "sphere", (0, -0.95, 0), (0.2, 0.2, 0.2), "substrate", "pommel", "meso", 0.6),
         _cs2node("bolster", "Bolster", "box", (0, 0.02, 0), (0.2, 0.18, 0.26), "substrate", "bolster", "meso", 0.6),
     ]
@@ -725,6 +735,8 @@ def apply_cs2_template(
     float_value: float | None = None,
     paint_seed: int | None = None,
     environment_available: bool = True,
+    item_family: str = "knife",
+    subtype: str | None = None,
 ) -> dict:
     """Seed a self-consistent image-first CS2 weapon-skin spec. Object geometry reuses the
     hard-surface path (primaryDomain=object); only the finish/material recipe is CS2-specific.
@@ -737,7 +749,7 @@ def apply_cs2_template(
     if resolved_style not in CS2_FINISH_PROFILES:
         raise ValueError(f"unknown finish style {resolved_style!r}; expected one of: {', '.join(CS2_FINISH_STYLES)}")
     profile = CS2_FINISH_PROFILES[resolved_style]
-    spec["componentTree"] = make_cs2_component_tree()
+    spec["componentTree"] = make_cs2_component_tree(item_family, subtype)
     spec["materials"] = [_cs2_finish_material(resolved_style, float_value, paint_seed), _cs2_substrate_material(), _cs2_hidden_material()]
     spec["featureReviewTargets"] = make_cs2_feature_targets()
     # top-level signal for the pre-render environment gate (mirrors the material value)
@@ -778,6 +790,51 @@ def apply_cs2_template(
         {"macroComponents": 5, "mesoComponents": 16, "microFeatureGroups": 8,
          "materialLayers": 4, "repetitionSystems": 2, "reviewViewpoints": 5}
     )
+    return spec
+
+
+def apply_cs2_manifest_evidence(spec: dict, manifest: dict) -> dict:
+    intake = {
+        "schemaVersion": manifest.get("schemaVersion"),
+        "state": manifest.get("state"),
+        "itemFamily": manifest.get("itemFamily"),
+        "subtype": manifest.get("subtype"),
+        "route": manifest.get("route"),
+        "exactnessTier": manifest.get("exactnessTier"),
+        "identity": manifest.get("identity", {}),
+        "finish": manifest.get("finish", {}),
+        "paintedRegions": manifest.get("paintedRegions", []),
+        "unpaintedRegions": manifest.get("unpaintedRegions", []),
+        "assets": manifest.get("assets", {}),
+        "camera": manifest.get("camera", {}),
+        "assumptions": manifest.get("assumptions", {}),
+        "confidence": manifest.get("confidence", {}),
+        "provenance": manifest.get("provenance", {}),
+        "warnings": manifest.get("warnings", []),
+    }
+    spec["cs2Intake"] = intake
+    spec["exactnessTier"] = manifest.get("exactnessTier")
+    if isinstance(manifest.get("camera"), dict) and manifest["camera"].get("referenceCamera"):
+        spec["referenceCamera"] = manifest["camera"]["referenceCamera"]
+    materials = spec.get("materials", [])
+    skin = next((item for item in materials if isinstance(item, dict) and item.get("id") == "skin-finish"), None)
+    if isinstance(skin, dict):
+        route = manifest.get("route")
+        projection = skin.setdefault("textureProjection", {})
+        if route == "reference-projection":
+            projection["mode"] = "projective"
+            projection["source"] = manifest.get("deLitAlbedo") or manifest.get("sourceImage")
+        elif route == "authored-texture":
+            projection["mode"] = "uv"
+            reference_pbr = manifest.get("referencePbr")
+            if isinstance(reference_pbr, dict):
+                skin["referencePbr"] = reference_pbr
+        elif route == "procedural-finish":
+            projection["mode"] = "procedural"
+        skin["route"] = route
+        skin["exactnessTier"] = manifest.get("exactnessTier")
+        skin["paintedRegions"] = manifest.get("paintedRegions", [])
+        skin["unpaintedRegions"] = manifest.get("unpaintedRegions", [])
     return spec
 
 
@@ -1475,6 +1532,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("target_name", help="Human-readable object name")
     parser.add_argument("--image", help="Reference image path or URL")
     parser.add_argument("--assessment", type=Path, help="Pre-spec assessment JSON from stage2_spec/new_pre_spec_assessment.py")
+    parser.add_argument("--manifest", type=Path, help="Validated cs2-intake.json produced by stage1 intake")
     parser.add_argument("--out", type=Path, help="Output JSON path")
     parser.add_argument("--force", action="store_true", help="Overwrite output file")
     parser.add_argument("--character", action="store_true",
@@ -1498,6 +1556,15 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     assessment = load_assessment(args.assessment)
+    manifest = None
+    if args.manifest:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            parser.error("CS2 intake manifest must be a JSON object")
+        if manifest.get("state") != "proceed":
+            parser.error(f"CS2 intake is not ready for spec authoring: {manifest.get('state', 'unknown')}")
+        if manifest.get("itemFamily") != "knife":
+            parser.error("CS2 spec authoring currently supports only the knife family")
     spec = make_spec(args.target_name, args.image, assessment)
     domain = None
     cs2_marker = False
@@ -1506,7 +1573,7 @@ def main(argv: list[str]) -> int:
         oc = pre.get("objectClass", {}) if isinstance(pre, dict) else {}
         domain = oc.get("primaryDomain") if isinstance(oc, dict) else None
         cs2_marker = bool(oc.get("cs2")) if isinstance(oc, dict) else False
-    if args.cs2 or cs2_marker:
+    if args.cs2 or cs2_marker or manifest is not None:
         finish_style = args.finish_style
         if finish_style is None and isinstance(assessment, dict):
             oc = assessment.get("preSpecAssessment", {}).get("objectClass", {})
@@ -1520,7 +1587,11 @@ def main(argv: list[str]) -> int:
             float_value=args.cs2_float,
             paint_seed=args.paint_seed,
             environment_available=not args.no_environment,
+            item_family=str(manifest.get("itemFamily", "knife")) if manifest else "knife",
+            subtype=str(manifest["subtype"]) if manifest and manifest.get("subtype") else None,
         )
+        if manifest:
+            apply_cs2_manifest_evidence(spec, manifest)
     elif args.character or domain in {"character", "hybrid"}:
         anatomy = None
         if isinstance(assessment, dict) and isinstance(assessment.get("preSpecAssessment"), dict):

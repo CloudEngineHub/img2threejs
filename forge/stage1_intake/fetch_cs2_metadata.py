@@ -68,16 +68,21 @@ def match_records(records: list[dict], weapon: str, skin: str, phase: str | None
     return matches
 
 
-def to_metadata(record: dict) -> dict:
-    return {
+def to_metadata(record: dict, source: str | None = None) -> dict:
+    metadata = {
         "name": record.get("name"),
         "weapon": _weapon_name(record),
         "paintIndex": record.get("paint_index"),
         "minFloat": record.get("min_float"),
         "maxFloat": record.get("max_float"),
+        "floatRange": {"min": record.get("min_float"), "max": record.get("max_float")},
         "rarity": _rarity_name(record),
         "imageUrl": record.get("image"),
     }
+    if source:
+        metadata["source"] = source
+    metadata["provenance"] = {"kind": "metadata-index", "source": source or "unspecified"}
+    return metadata
 
 
 def main(argv: list[str]) -> int:
@@ -113,7 +118,8 @@ def main(argv: list[str]) -> int:
               "disambiguate (nothing guessed).", file=sys.stderr)
         return 2
 
-    metadata = to_metadata(matches[0])
+    source = str(args.index_file.expanduser().resolve()) if args.index_file else args.index_url
+    metadata = to_metadata(matches[0], source)
 
     if args.download_image and metadata.get("imageUrl"):
         args.download_image.expanduser().mkdir(parents=True, exist_ok=True)

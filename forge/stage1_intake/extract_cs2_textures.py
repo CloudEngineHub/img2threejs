@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import locate_cs2_vpk  # noqa: E402  (sibling module, resolved via the path insert above)
+from cs2_foundation import classify_map_path  # noqa: E402
 
 SOURCE2VIEWER_BINARY = "Source2Viewer-CLI"
 
@@ -66,6 +67,16 @@ def classify_extracted_maps(out_dir: Path) -> dict[str, list[str]]:
     return buckets
 
 
+def build_asset_records(out_dir: Path) -> list[dict]:
+    records = []
+    for path in sorted(out_dir.rglob("*")):
+        if path.is_file():
+            record = classify_map_path(path)
+            record.update({"source": "local-vpk", "ipBoundary": "local-user-install-not-redistributable"})
+            records.append(record)
+    return records
+
+
 def extract(out_dir: Path, vpk: Path | None, roots: list[Path] | None, filter_glob: str | None) -> dict:
     if vpk is None:
         vpk = locate_cs2_vpk.locate_vpk(roots)
@@ -88,7 +99,7 @@ def extract(out_dir: Path, vpk: Path | None, roots: list[Path] | None, filter_gl
                 "reason": f"{SOURCE2VIEWER_BINARY} exited {result.returncode}: "
                           f"{(result.stderr or '').strip()[:200]}; falling back to image-only"}
     return {"status": "ok", "vpk": str(vpk), "outDir": str(out_dir),
-            "maps": classify_extracted_maps(out_dir)}
+            "maps": classify_extracted_maps(out_dir), "assets": build_asset_records(out_dir)}
 
 
 def main(argv: list[str]) -> int:

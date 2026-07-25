@@ -305,6 +305,15 @@ def generate(spec: dict[str, Any], pass_id: str) -> str:
     target = str(spec.get("targetName") or "Procedural Object")
     type_name = pascal_case(target)
     function_name = f"create{type_name}Model"
+    reconstruction_evidence = {
+        "itemFamily": spec.get("itemFamily"),
+        "subtype": spec.get("subtype"),
+        "componentAdapter": spec.get("componentAdapter"),
+        "route": spec.get("route"),
+        "exactnessTier": spec.get("exactnessTier"),
+        "referenceCamera": spec.get("referenceCamera"),
+        "approximationNotes": spec.get("approximationNotes", []),
+    }
     materials = {
         str(material.get("id") or f"material{index}"): material
         for index, material in enumerate(spec.get("materials", []))
@@ -1014,6 +1023,7 @@ def generate(spec: dict[str, Any], pass_id: str) -> str:
         f"export function {function_name}(options: ProceduralModelOptions = {{}}): THREE.Group {{",
         "  const root = new THREE.Group();",
         f"  root.name = {json.dumps(target)};",
+        f"  root.userData.reconstructionEvidence = {json_literal(reconstruction_evidence)};",
         "",
         "  const materialMap: Record<string, THREE.Material> = {};",
         ]

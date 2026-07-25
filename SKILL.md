@@ -159,7 +159,11 @@ Full flags: `grimoire/scripts.md`. Never let a script *score* visuals — that i
 8. Package one side-by-side sheet, then inspect it with agent vision:
    `forge/stage4_review/make_comparison_sheet.py --reference <img> --render <shot> --out cmp.png --json`.
 9. Record the review (overall + per-layer + per-feature scores + decision):
-   `forge/stage4_review/append_review.py object-sculpt-spec.json --pass-id <pass> --fidelity <0-1> --action <continue|refine-spec|refine-code|request-input|stop> --summary "..." --render-screenshot <shot> --comparison-image cmp.png --ai-vision-score <0-1> --layer-scores-json '{...}' --feature-reviews-json <f.json> --in-place`.
+    `forge/stage4_review/append_review.py object-sculpt-spec.json --pass-id <pass> --fidelity <0-1> --action <continue|refine-spec|refine-code|request-input|stop> --summary "..." --render-screenshot <shot> --comparison-image cmp.png --ai-vision-score <0-1> --layer-scores-json '{...}' --feature-reviews-json <f.json> --in-place`.
+   For the CS2 knife path, also attach the versioned report with
+   `--cs2-review-json cs2-review.json --review-scene-json forge/tests/fixtures/knife_review_scene.json`.
+   A failed family, painted-region, projection-coverage, critical-detail, or orbit gate blocks
+   `continue` even when the global score passes. See `docs/cs2/review-gates.md`.
 10. Sync pipeline state after manual review edits:
     `forge/stage3_build/orchestrate_passes.py sync object-sculpt-spec.json --in-place`.
 
@@ -249,6 +253,12 @@ evidence caused it, what still differs, and choose exactly one next action:
   `forge/stage4_review/diagnose_render_multi_angle.py` flags `degenerate-view` when an orbited
   silhouette collapses (a flat plane faking a volume). Orbit angles use reference-free
   self-consistency — never scored against a reference angle the photo doesn't cover.
+- **CS2 knife review contract**: `forge/stage4_review/cs2_review.py` consumes the manifest and
+  versioned scene fixture, then blocks wrong family identity, missing projection coverage,
+  painted-region mismatch, critical identity-detail failure, finish/material response failure,
+  and degenerate orbit form. It records exactness tier, hidden-region confidence, per-region
+  confidence, approximation notes, camera, environment hash, exposure, tone mapping, resolution,
+  background, and renderer version.
 - **Bounded correction loop (token-burn safety)**: `forge/stage4_review/correction_loop.py`
   guarantees termination (success/repeated-defect/oscillation/plateau/hard-ceiling), escalating to
   `request-input` — never a silent infinite burn.
