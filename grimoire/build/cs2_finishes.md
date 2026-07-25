@@ -1,11 +1,17 @@
 # CS2 / Steam Item Finishes
 
-Rulebook for the CS2 weapon-skin finish track. The reconstruction stays **image-first**: a
+Rulebook for the supported CS2 **knife** finish track. The reconstruction stays **image-first**: a
 reference image is the only required input. A skin name, descriptor (`finishStyle`, `float`,
 `paintSeed`), or an extracted Valve texture are optional layers that add exactness when the user
 supplies them — they never block the default path.
 
 **Two finish routes, chosen by goal — do NOT default to procedural for a reference-match.**
+
+This rulebook does not authorize pistol, rifle, SMG, sniper, heavy, glove, or unknown knife
+subtypes. Intake must return `unsupported-family` or `unsupported-subtype` before finish selection
+for those families. The route (`reference-projection`, `authored-texture`, or `procedural-finish`)
+and evidence tier (`image-only`, `metadata-assisted`, or `exact-texture`) are separate fields in
+`cs2-intake.json`; a route fallback never changes the evidence tier.
 
 - **Projection (default when the goal is matching a specific reference image — e.g. rebuilding a
   named skin from its photo):** author the geometry procedurally, then project the **de-lit**
@@ -106,7 +112,7 @@ path: the flagship image-only Doppler case passes normally.
 
 ## Complexity tier & detail floor
 
-A CS2 weapon/knife/glove skin always carries more identity-defining detail than a generic object
+A supported CS2 knife skin always carries more identity-defining detail than a generic object
 at the same structural tier, so `--cs2` **defaults the complexity tier to `ultra-complex`**
 (`targetMinDetails` 16) — the CS2 track is held to the top fidelity bar regardless of how simple
 the bare geometry looks. If `--complexity` is set lower by hand, the detail-count floor still
