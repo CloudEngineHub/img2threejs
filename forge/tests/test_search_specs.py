@@ -138,7 +138,13 @@ def write_fixture_source(root, content="# Safety ring\nKarambit retention compon
     return source
 
 
-def write_cli_fixture(root, *, malformed_profile=False, include_raw_roots=True):
+def write_cli_fixture(
+    root,
+    *,
+    malformed_profile=False,
+    include_raw_roots=True,
+    cache_path=".cache/spec-search/cs2.json",
+):
     shared = root / "forge/_shared"
     intake = root / "forge/stage1_intake"
     shared.mkdir(parents=True, exist_ok=True)
@@ -204,7 +210,7 @@ def write_cli_fixture(root, *, malformed_profile=False, include_raw_roots=True):
                         "optional_source_roots": ["docs/raw"],
                         "distilled_records": ["docs/specs/vocabulary/cs2.jsonl"],
                         "documentation": "docs/README.md",
-                        "cache": ".cache/spec-search/cs2.json",
+                        "cache": cache_path,
                     }
                 },
             },
@@ -214,11 +220,18 @@ def write_cli_fixture(root, *, malformed_profile=False, include_raw_roots=True):
     return intake / "search_specs.py"
 
 
-def run_cli_fixture(root, *arguments, malformed_profile=False, include_raw_roots=True):
+def run_cli_fixture(
+    root,
+    *arguments,
+    malformed_profile=False,
+    include_raw_roots=True,
+    cache_path=".cache/spec-search/cs2.json",
+):
     cli = write_cli_fixture(
         root,
         malformed_profile=malformed_profile,
         include_raw_roots=include_raw_roots,
+        cache_path=cache_path,
     )
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -869,6 +882,36 @@ class CacheLifecycleTest(unittest.TestCase):
 
 
 class CliOutputTest(unittest.TestCase):
+    def _assert_unsafe_profile_cache_path(self, configured_cache, outside_name):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            outside = root.parent / f"{root.name}-{outside_name}"
+            result = run_cli_fixture(
+                root,
+                "needle",
+                "--json",
+                cache_path=configured_cache(root, outside),
+            )
+
+            self.assertEqual(result.returncode, 3, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error"]["code"], "cache_failure")
+            self.assertNotIn(str(root), result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(outside.exists())
+
+    def test_traversal_profile_cache_path_returns_cache_failure_without_disclosure_or_write(self):
+        self._assert_unsafe_profile_cache_path(
+            lambda _root, outside: "../" + outside.name,
+            "escape.json",
+        )
+
+    def test_absolute_profile_cache_path_returns_cache_failure_without_disclosure_or_write(self):
+        self._assert_unsafe_profile_cache_path(
+            lambda root, _outside: str(root / "absolute.json"),
+            "absolute.json",
+        )
+
     def test_symlinked_cache_parent_returns_structured_cache_failure(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

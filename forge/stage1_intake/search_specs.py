@@ -23,6 +23,7 @@ from forge._shared.spec_search import (  # noqa: E402
     IndexLoadResult,
     IndexRequest,
     ProfileValidationError,
+    ProfileCachePathError,
     SearchOutputRequest,
     SerializedSearchMatch,
     SourceIngestionError,
@@ -213,6 +214,11 @@ def main(argv: Sequence[str]) -> int:
         return _emit_error(
             context,
             CliFailure("unknown_collection", str(error), 2),
+        )
+    except ProfileCachePathError as error:
+        return _emit_error(
+            context,
+            CliFailure("cache_failure", str(error), 3),
         )
     except ProfileValidationError as error:
         return _emit_error(

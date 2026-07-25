@@ -314,6 +314,14 @@ class ProfileValidationError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileCachePathError(ValueError):
+    reason: str
+
+    def __str__(self) -> str:
+        return self.reason
+
+
+@dataclass(frozen=True, slots=True)
 class UnknownCollectionError(KeyError):
     collection: str
 
@@ -472,7 +480,9 @@ def _profile_cache_path(mapping: dict[str, JsonValue], path: Path) -> str:
     configured = _profile_string(mapping, "cache", path)
     cache_path = Path(configured)
     if cache_path.is_absolute() or ".." in cache_path.parts:
-        raise _profile_error(path, "cache path must be relative and stay within project_root")
+        raise ProfileCachePathError(
+            "cache path must be relative and stay within project_root"
+        )
     return configured
 
 
