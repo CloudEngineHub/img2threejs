@@ -7,8 +7,33 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Final, TypedDict
 
-from new_sculpt_spec import make_pre_spec_assessment, make_quality_contract
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from forge._shared.spec_search import (  # noqa: E402
+    CacheReadError,
+    CacheValidationError,
+    CacheWriteError,
+    IndexBuildError,
+    IndexRequest,
+    ProfileCachePathError,
+    ProfileValidationError,
+    JsonValue,
+    SearchOutputRequest,
+    SerializedSearchMatch,
+    SourceIngestionError,
+    SpecRecordValidationError,
+    UnknownCollectionError,
+    load_or_build_index,
+    load_profile,
+    serialize_search_results,
+)
+from forge.stage2_spec.new_sculpt_spec import (  # noqa: E402
+    make_pre_spec_assessment,
+    make_quality_contract,
+)
 
 
 COMPLEXITY_MINIMUMS = {
@@ -70,13 +95,81 @@ CS2_INTENT_KEYWORDS = (
     "karambit", "butterfly knife", "bayonet", "gut knife", "falchion", "bowie knife",
 )
 
+DEFAULT_SPEC_SEARCH_LIMIT: Final = 3
+DEFAULT_SPEC_SEARCH_SNIPPET_CHARS: Final = 250
+
+
+class LocalSpecSearchIndex(TypedDict):
+    status: str
+    reason: str
+    fingerprint: str
+
+
+class LocalSpecSearchPayload(TypedDict):
+    collection: str
+    query: str
+    index: LocalSpecSearchIndex
+    matches: list[SerializedSearchMatch]
+
+
+class PreSpecPayloadRequired(TypedDict):
+    targetName: str
+    sourceImage: str
+    preSpecAssessment: dict[str, JsonValue]
+    qualityContract: dict[str, JsonValue]
+    authoringInstruction: str
+
+
+class PreSpecPayload(PreSpecPayloadRequired, total=False):
+    localSpecSearch: LocalSpecSearchPayload
+
 
 def detect_cs2_intent(target_name: str) -> bool:
     lowered = target_name.lower()
     return " | " in target_name or any(keyword in lowered for keyword in CS2_INTENT_KEYWORDS)
 
 
-def make_payload(target_name: str, image: str | None, complexity: str, is_cs2: bool = False) -> dict:
+def select_spec_collection(target_name: str, requested_collection: str | None) -> str:
+    """Choose the local specification collection for a pipeline target."""
+    if requested_collection:
+        return requested_collection
+    return "cs2" if detect_cs2_intent(target_name) else "core_3d"
+
+
+def search_local_specs(
+    target_name: str,
+    collection: str,
+    extra_terms: list[str],
+    force_reindex: bool,
+) -> LocalSpecSearchPayload:
+    """Search local specs and return a portable evidence bundle for the assessment."""
+    query = " ".join([target_name, *extra_terms]).strip()
+    profile = load_profile(collection)
+    loaded = load_or_build_index(
+        IndexRequest(PROJECT_ROOT, collection, profile, force_reindex)
+    )
+    matches = serialize_search_results(
+        loaded.index,
+        SearchOutputRequest(query, DEFAULT_SPEC_SEARCH_LIMIT, DEFAULT_SPEC_SEARCH_SNIPPET_CHARS),
+    )
+    return {
+        "collection": collection,
+        "query": query,
+        "index": {
+            "status": loaded.status,
+            "reason": loaded.reason,
+            "fingerprint": loaded.fingerprint,
+        },
+        "matches": matches,
+    }
+
+
+def make_payload(
+    target_name: str,
+    image: str | None,
+    complexity: str,
+    is_cs2: bool = False,
+) -> PreSpecPayload:
     assessment = make_pre_spec_assessment(target_name)
     contract = make_quality_contract()
     is_cs2 = is_cs2 or detect_cs2_intent(target_name)
@@ -97,7 +190,7 @@ def make_payload(target_name: str, image: str | None, complexity: str, is_cs2: b
         assessment["specDepthDecision"]["minimumComponentLevels"] = ["macro", "meso"]
     contract["qualityBar"] = complexity
     contract["minimumSpecDepth"] = COMPLEXITY_MINIMUMS[complexity]
-    return {
+    payload: PreSpecPayload = {
         "targetName": target_name,
         "sourceImage": image or "",
         "preSpecAssessment": assessment,
@@ -107,6 +200,7 @@ def make_payload(target_name: str, image: str | None, complexity: str, is_cs2: b
             "and unknowns before generating or implementing ObjectSculptSpec."
         ),
     }
+    return payload
 
 
 def main(argv: list[str]) -> int:
@@ -128,11 +222,47 @@ def main(argv: list[str]) -> int:
         help=f"CS2 weapon/knife/glove skin -- defaults complexity to ultra-complex (targetMinDetails 16); "
              f"never below the {CS2_DETAIL_MINIMUM} floor even if --complexity is set lower.",
     )
+    parser.add_argument(
+        "--collection",
+        help="Spec-search collection; defaults to cs2 for CS2 targets and core_3d otherwise.",
+    )
+    parser.add_argument(
+        "--spec-query",
+        action="append",
+        default=[],
+        help="Additional observed terms to add to the automatic local-spec query; repeatable.",
+    )
+    parser.add_argument(
+        "--reindex-specs",
+        action="store_true",
+        help="Force rebuilding the local BM25 index before creating the assessment.",
+    )
     args = parser.parse_args(argv)
 
     is_cs2 = args.cs2 or detect_cs2_intent(args.target_name)
     complexity = args.complexity or ("ultra-complex" if is_cs2 else "moderate")
-    payload = json.dumps(make_payload(args.target_name, args.image, complexity, args.cs2), indent=2, ensure_ascii=False) + "\n"
+    payload_object = make_payload(args.target_name, args.image, complexity, args.cs2)
+    collection = select_spec_collection(args.target_name, args.collection)
+    try:
+        payload_object["localSpecSearch"] = search_local_specs(
+            args.target_name,
+            collection,
+            args.spec_query,
+            args.reindex_specs,
+        )
+    except (
+        CacheReadError,
+        CacheValidationError,
+        CacheWriteError,
+        IndexBuildError,
+        ProfileCachePathError,
+        ProfileValidationError,
+        SourceIngestionError,
+        SpecRecordValidationError,
+        UnknownCollectionError,
+    ) as error:
+        parser.error(f"local spec search failed: {error}")
+    payload = json.dumps(payload_object, indent=2, ensure_ascii=False) + "\n"
     if args.out:
         output = args.out.expanduser().resolve()
         if output.exists() and not args.force:

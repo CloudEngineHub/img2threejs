@@ -41,6 +41,15 @@
       ],
       "documentation": "docs/specs/vocabulary/README.md",
       "cache": ".cache/spec-search/cs2.json"
+    },
+    "core_3d": {
+      "source_roots": [],
+      "optional_source_roots": [],
+      "distilled_records": [
+        "docs/specs/vocabulary/core_3d.jsonl"
+      ],
+      "documentation": "docs/specs/vocabulary/README.md",
+      "cache": ".cache/spec-search/core_3d.json"
     }
   }
 }

@@ -77,6 +77,46 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(spec["schemaVersion"], "2.1")
         self.assertEqual(spec["targetName"], "Oak")
 
+    def test_cs2_assessment_embeds_local_spec_search_results(self):
+        r = run(
+            "stage2_spec/new_pre_spec_assessment.py",
+            "Karambit Fade",
+            "--out",
+            self.assessment,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        assessment = json.loads(self.assessment.read_text())
+        search = assessment["localSpecSearch"]
+        self.assertEqual(search["collection"], "cs2")
+        self.assertEqual(search["query"], "Karambit Fade")
+        self.assertGreater(len(search["matches"]), 0)
+        self.assertTrue(search["matches"][0]["source_refs"])
+        self.assertTrue(search["matches"][0]["evidence_refs"])
+
+        r = run(
+            "stage2_spec/new_sculpt_spec.py",
+            "Karambit Fade",
+            "--assessment",
+            self.assessment,
+            "--out",
+            self.spec,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        spec = json.loads(self.spec.read_text())
+        self.assertEqual(spec["localSpecSearch"]["collection"], "cs2")
+        self.assertTrue(spec["localSpecSearch"]["matches"])
+
+    def test_generic_assessment_uses_generic_spec_collection(self):
+        r = run(
+            "stage2_spec/new_pre_spec_assessment.py",
+            "wooden chair",
+            "--out",
+            self.assessment,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        assessment = json.loads(self.assessment.read_text())
+        self.assertEqual(assessment["localSpecSearch"]["collection"], "core_3d")
+
     def test_normal_validate_passes_strict_fails_on_shallow(self):
         run("stage2_spec/new_pre_spec_assessment.py", "Oak", "--complexity", "complex",
             "--out", self.assessment)

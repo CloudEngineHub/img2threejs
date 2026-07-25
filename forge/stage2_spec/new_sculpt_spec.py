@@ -785,14 +785,18 @@ def make_spec(target_name: str, image: str | None, assessment_payload: dict | No
     target_id = slugify(target_name)
     pre_spec_assessment = make_pre_spec_assessment(target_name)
     quality_contract = make_quality_contract()
+    local_spec_search = None
     if assessment_payload:
         incoming_assessment = assessment_payload.get("preSpecAssessment")
         incoming_contract = assessment_payload.get("qualityContract")
+        incoming_local_spec_search = assessment_payload.get("localSpecSearch")
         if isinstance(incoming_assessment, dict):
             pre_spec_assessment = incoming_assessment
         if isinstance(incoming_contract, dict):
             quality_contract = incoming_contract
-    return {
+        if isinstance(incoming_local_spec_search, dict):
+            local_spec_search = incoming_local_spec_search
+    spec = {
         "targetName": target_name,
         "targetId": target_id,
         "schemaVersion": "2.1",
@@ -1461,6 +1465,9 @@ def make_spec(target_name: str, image: str | None, assessment_payload: dict | No
         ],
         "risks": [],
     }
+    if local_spec_search is not None:
+        spec["localSpecSearch"] = local_spec_search
+    return spec
 
 
 def main(argv: list[str]) -> int:
