@@ -60,7 +60,6 @@ It runs under Claude Code, Codex, or OpenCode. It is agent-agnostic: wherever th
 - **Maximum likeness for a specific person or character.** An opt-in projection-first path fits a parametric template to image landmarks, de-lights the photo, camera-matches the render, and projects the reference onto the mesh. A single image cannot guarantee 100 percent likeness, so the pipeline reports per-region confidence and asks for more views when it matters. Details: `grimoire/character/likeness_maximization.md`.
 - **CS2 weapon review gates.** Knife and Glock-18 routes use family-specific component contracts. The review records exactness tier, family identity, painted-region and projection coverage, per-region confidence, approximation notes, and versioned review-scene metadata; component-coverage and map-stripped blockout gates prevent a convincing texture from standing in for real structure. See [`docs/cs2/review-gates.md`](docs/cs2/review-gates.md).
 - **Generic image intake.** One admitted primary image always creates a generic reconstruction handoff; optional identity candidates and a secondary image enrich it but never require a name or select a family adapter automatically. See [`docs/generic-image-intake.md`](docs/generic-image-intake.md).
-
 ---
 
 ## How it works
