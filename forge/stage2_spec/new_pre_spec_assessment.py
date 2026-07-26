@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Final, TypedDict
+from typing import Any, Final, TypedDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -137,6 +137,27 @@ def select_spec_collection(target_name: str, requested_collection: str | None) -
     return "cs2" if detect_cs2_intent(target_name) else "core_3d"
 
 
+def primary_source_path(manifest: dict[str, Any]) -> str:
+    primary = manifest.get("primaryImage")
+    if isinstance(primary, dict):
+        path = primary.get("path")
+        if isinstance(path, str):
+            return path
+    views = manifest.get("sourceViews")
+    if isinstance(views, list):
+        primary_view = next((view for view in views if isinstance(view, dict) and view.get("role") == "primary"), None)
+        if isinstance(primary_view, dict) and isinstance(primary_view.get("path"), str):
+            return primary_view["path"]
+        if views and isinstance(views[0], dict) and isinstance(views[0].get("path"), str):
+            return views[0]["path"]
+    return ""
+
+
+def identity_is_accepted(manifest: dict[str, Any]) -> bool:
+    decision = manifest.get("identityDecision")
+    return isinstance(decision, dict) and decision.get("status") == "accepted"
+
+
 def search_local_specs(
     target_name: str,
     collection: str,
@@ -170,8 +191,8 @@ def make_payload(
     image: str | None,
     complexity: str,
     is_cs2: bool = False,
-    manifest: dict | None = None,
-) -> PreSpecPayload:
+    manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     assessment = make_pre_spec_assessment(target_name)
     contract = make_quality_contract()
     is_cs2 = is_cs2 or detect_cs2_intent(target_name)
@@ -192,7 +213,7 @@ def make_payload(
         assessment["specDepthDecision"]["minimumComponentLevels"] = ["macro", "meso"]
     contract["qualityBar"] = complexity
     contract["minimumSpecDepth"] = COMPLEXITY_MINIMUMS[complexity]
-    payload: PreSpecPayload = {
+    payload: dict[str, Any] = {
         "targetName": target_name,
         "sourceImage": image or "",
         "preSpecAssessment": assessment,
@@ -203,6 +224,7 @@ def make_payload(
         ),
     }
     if manifest is not None:
+        primary_source = primary_source_path(manifest)
         intake = {
             "schemaVersion": manifest.get("schemaVersion"),
             "itemFamily": manifest.get("itemFamily"),
@@ -212,11 +234,16 @@ def make_payload(
             "confidence": manifest.get("confidence", {}),
             "provenance": manifest.get("provenance", {}),
             "warnings": manifest.get("warnings", []),
+            "observedObject": manifest.get("observedObject", {}),
+            "genericHandoff": manifest.get("genericHandoff", {}),
         }
         payload["cs2Intake"] = intake
+        payload["sourceImage"] = primary_source or payload["sourceImage"]
+        payload["preSpecAssessment"]["sourceImage"] = primary_source or payload["preSpecAssessment"]["sourceImage"]
         payload["preSpecAssessment"]["cs2Intake"] = intake
-        payload["preSpecAssessment"]["objectClass"]["itemFamily"] = manifest.get("itemFamily")
-        payload["preSpecAssessment"]["objectClass"]["subtype"] = manifest.get("subtype")
+        resolved_identity = manifest.get("resolvedIdentity")
+        payload["preSpecAssessment"]["objectClass"]["itemFamily"] = resolved_identity.get("itemFamily") if isinstance(resolved_identity, dict) else None
+        payload["preSpecAssessment"]["objectClass"]["subtype"] = resolved_identity.get("subtype") if isinstance(resolved_identity, dict) else None
         payload["preSpecAssessment"]["objectClass"]["route"] = manifest.get("route")
         payload["preSpecAssessment"]["objectClass"]["exactnessTier"] = manifest.get("exactnessTier")
     return payload
@@ -268,17 +295,21 @@ def main(argv: list[str]) -> int:
             parser.error("CS2 intake manifest must be a JSON object")
         if manifest.get("state") not in {"proceed", "fallback"}:
             parser.error(f"CS2 intake is not ready for assessment: {manifest.get('state', 'unknown')}")
-        is_cs2 = True
+        is_cs2 = identity_is_accepted(manifest)
     payload_object = make_payload(args.target_name, args.image, complexity, is_cs2, manifest)
-    collection = select_spec_collection(args.target_name, args.collection)
-    try:
-        payload_object["localSpecSearch"] = search_local_specs(
-            args.target_name,
-            collection,
-            args.spec_query,
-            args.reindex_specs,
-        )
-    except (
+    accepted_identity = manifest is None or identity_is_accepted(manifest)
+    collection = select_spec_collection(args.target_name, args.collection) if accepted_identity else "core_3d"
+    if not accepted_identity:
+        payload_object["localSpecSearch"] = {"status": "not-eligible", "reason": "identity-not-accepted"}
+    else:
+        try:
+            payload_object["localSpecSearch"] = search_local_specs(
+                args.target_name,
+                collection,
+                args.spec_query,
+                args.reindex_specs,
+            )
+        except (
         CacheReadError,
         CacheValidationError,
         CacheWriteError,
@@ -288,8 +319,8 @@ def main(argv: list[str]) -> int:
         SourceIngestionError,
         SpecRecordValidationError,
         UnknownCollectionError,
-    ) as error:
-        parser.error(f"local spec search failed: {error}")
+        ) as error:
+            payload_object["localSpecSearch"] = {"status": "error", "reason": str(error)}
     payload = json.dumps(payload_object, indent=2, ensure_ascii=False) + "\n"
     if args.out:
         output = args.out.expanduser().resolve()

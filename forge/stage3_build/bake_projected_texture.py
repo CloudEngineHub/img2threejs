@@ -61,8 +61,11 @@ def build_descriptor(args: argparse.Namespace) -> dict[str, Any]:
         intake = intake_value
         if not args.reference_image:
             views = intake.get("sourceViews", [])
-            if isinstance(views, list) and views and isinstance(views[0], dict):
-                source_path = views[0].get("path")
+            primary = next((view for view in views if isinstance(view, dict) and view.get("role") == "primary"), None) if isinstance(views, list) else None
+            if primary is None and isinstance(views, list) and views and isinstance(views[0], dict):
+                primary = views[0]
+            if isinstance(primary, dict):
+                source_path = primary.get("path")
                 if isinstance(source_path, str):
                     args.reference_image = source_path
         if intake.get("state") != "proceed":

@@ -102,10 +102,12 @@ class AdapterAndReviewTests(unittest.TestCase):
 
     def test_manifest_evidence_reaches_assessment_and_spec(self) -> None:
         manifest = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "state": "proceed",
-            "itemFamily": "knife",
-            "subtype": "karambit",
+            "primaryImage": {"role": "primary", "path": "fixture"},
+            "identityDecision": {"status": "accepted"},
+            "resolvedIdentity": {"itemFamily": "knife", "subtype": "karambit"},
+            "componentAdapter": "cs2-knife-v1",
             "route": "procedural-finish",
             "exactnessTier": "metadata-assisted",
             "confidence": {"overall": 0.9},

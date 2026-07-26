@@ -9,6 +9,7 @@ import math
 import re
 import sys
 from pathlib import Path
+from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_shared"))
 from status_banner import emit_status
 
@@ -342,7 +343,9 @@ def make_character_component_tree(anatomy: dict | None = None) -> list:
         # walk up the logical parent chain (parents are unrotated), summing offsets
         while cur and cur != "root":
             po = offsets.get(cur, (0.0, 0.0, 0.0))
-            x += po[0]; y += po[1]; z += po[2]
+            x += po[0]
+            y += po[1]
+            z += po[2]
             cur = parent_of.get(cur, "root")
         return (x, y, z)
 
@@ -869,6 +872,31 @@ def apply_cs2_manifest_evidence(spec: dict, manifest: dict) -> dict:
         skin["exactnessTier"] = manifest.get("exactnessTier")
         skin["paintedRegions"] = manifest.get("paintedRegions", [])
         skin["unpaintedRegions"] = manifest.get("unpaintedRegions", [])
+    return spec
+
+
+def apply_generic_manifest_evidence(spec: dict, manifest: dict) -> dict:
+    primary: dict[str, Any] | None = manifest.get("primaryImage") if isinstance(manifest.get("primaryImage"), dict) else None
+    if not isinstance(primary, dict):
+        views = manifest.get("sourceViews")
+        primary = next((view for view in views if isinstance(view, dict) and view.get("role") == "primary"), None) if isinstance(views, list) else None
+    source_path = primary.get("path") if isinstance(primary, dict) else None
+    handoff: dict[str, Any] = manifest.get("genericHandoff") if isinstance(manifest.get("genericHandoff"), dict) else {}
+    spec["genericIntake"] = {
+        "schemaVersion": manifest.get("schemaVersion"),
+        "state": manifest.get("state"),
+        "primarySource": handoff.get("primarySource", primary or {}),
+        "observedGeometry": handoff.get("observedGeometry", {}),
+        "observedMaterials": handoff.get("observedMaterials", {}),
+        "observedDetails": handoff.get("observedDetails", []),
+        "inferredRegions": handoff.get("inferredRegions", []),
+        "route": manifest.get("route"),
+        "exactnessTier": manifest.get("exactnessTier"),
+        "resolvedIdentity": None,
+        "componentAdapter": None,
+    }
+    if isinstance(source_path, str):
+        spec["sourceImage"] = source_path
     return spec
 
 
@@ -1597,10 +1625,8 @@ def main(argv: list[str]) -> int:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             parser.error("CS2 intake manifest must be a JSON object")
-        if manifest.get("state") != "proceed":
+        if manifest.get("state") not in {"proceed", "fallback"}:
             parser.error(f"CS2 intake is not ready for spec authoring: {manifest.get('state', 'unknown')}")
-        if manifest.get("itemFamily") != "knife":
-            parser.error("CS2 spec authoring currently supports only the knife family")
     spec = make_spec(args.target_name, args.image, assessment)
     domain = None
     cs2_marker = False
@@ -1609,7 +1635,8 @@ def main(argv: list[str]) -> int:
         oc = pre.get("objectClass", {}) if isinstance(pre, dict) else {}
         domain = oc.get("primaryDomain") if isinstance(oc, dict) else None
         cs2_marker = bool(oc.get("cs2")) if isinstance(oc, dict) else False
-    if args.cs2 or cs2_marker or manifest is not None:
+    has_knife_adapter = isinstance(manifest, dict) and manifest.get("componentAdapter") == "cs2-knife-v1"
+    if args.cs2 or cs2_marker or has_knife_adapter:
         finish_style = args.finish_style
         if finish_style is None and isinstance(assessment, dict):
             oc = assessment.get("preSpecAssessment", {}).get("objectClass", {})
@@ -1628,6 +1655,8 @@ def main(argv: list[str]) -> int:
         )
         if manifest:
             apply_cs2_manifest_evidence(spec, manifest)
+    elif manifest:
+        apply_generic_manifest_evidence(spec, manifest)
     elif args.character or domain in {"character", "hybrid"}:
         anatomy = None
         if isinstance(assessment, dict) and isinstance(assessment.get("preSpecAssessment"), dict):

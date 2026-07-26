@@ -8,9 +8,12 @@ import zlib
 from pathlib import Path
 
 from forge.stage1_intake.cs2_manifest import (
+    apply_confirmation,
     build_classification_record,
     build_manifest,
+    normalize_manifest,
     persist_manifest,
+    record_retrieval_outcome,
     validate_manifest,
 )
 
@@ -33,16 +36,19 @@ def write_png(path: Path, width: int = 128, height: int = 128) -> None:
 
 
 class Cs2ManifestTests(unittest.TestCase):
-    def test_image_only_knife_manifest_requires_authoritative_classification(self) -> None:
+    def test_primary_only_without_name_proceeds_generically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reference = Path(directory) / "knife.png"
             write_png(reference)
             manifest = build_manifest(reference, None)
-            self.assertEqual(manifest["state"], "request-input")
+            self.assertEqual(manifest["state"], "proceed")
             self.assertEqual(manifest["exactnessTier"], "image-only")
+            self.assertEqual(manifest["primaryImage"]["role"], "primary")
+            self.assertIsNone(manifest["resolvedIdentity"])
+            self.assertIsNone(manifest["genericHandoff"]["componentAdapter"])
             self.assertTrue(validate_manifest(manifest))
 
-    def test_classified_knife_proceeds_and_preserves_heuristic_signal(self) -> None:
+    def test_candidate_is_not_an_adapter_until_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reference = Path(directory) / "knife.png"
             write_png(reference)
@@ -51,29 +57,61 @@ class Cs2ManifestTests(unittest.TestCase):
             )
             manifest = build_manifest(reference, classification)
             self.assertEqual(manifest["state"], "proceed")
-            self.assertEqual(manifest["itemFamily"], "knife")
-            self.assertEqual(manifest["route"], "reference-projection")
-            self.assertIn("heuristicSignal", manifest["warnings"])
+            self.assertEqual(manifest["identityDecision"]["status"], "provisional")
+            self.assertNotIn("componentAdapter", manifest)
+            accepted = apply_confirmation(manifest, "accept", manifest["identityCandidates"][0]["id"])
+            self.assertEqual(accepted["identityDecision"]["status"], "accepted")
+            self.assertEqual(accepted["componentAdapter"], "cs2-knife-v1")
             self.assertTrue(validate_manifest(manifest))
 
-    def test_unsupported_family_never_receives_knife_adapter(self) -> None:
+    def test_unknown_family_continues_without_knife_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reference = Path(directory) / "rifle.png"
             write_png(reference)
             classification = build_classification_record("rifle", "ak47", 0.99, ["view:front:subject"])
             manifest = build_manifest(reference, classification)
-            self.assertEqual(manifest["state"], "unsupported-family")
+            accepted = apply_confirmation(manifest, "accept", manifest["identityCandidates"][0]["id"])
+            self.assertEqual(accepted["state"], "proceed")
             self.assertNotIn("componentAdapter", manifest)
+            self.assertNotIn("componentAdapter", accepted)
+
+    def test_bad_secondary_preserves_primary_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            primary = Path(directory) / "primary.png"
+            secondary = Path(directory) / "secondary.png"
+            write_png(primary)
+            secondary.write_bytes(b"not-an-image")
+            manifest = build_manifest(primary, secondary_image=secondary)
+            self.assertEqual(manifest["state"], "proceed")
+            self.assertTrue(manifest["secondaryAssociation"]["replacementRequested"])
+            self.assertEqual(manifest["secondaryAssociation"]["status"], "contradicted")
+
+    def test_confirmation_and_retrieval_failure_are_non_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "unknown.png"
+            write_png(reference)
+            manifest = apply_confirmation(build_manifest(reference), "continue-generically")
+            self.assertEqual(manifest["identityDecision"]["status"], "skipped")
+            failed = record_retrieval_outcome(manifest, "error", "index-unavailable")
+            self.assertEqual(failed["state"], "proceed")
+            self.assertEqual(failed["enrichment"]["retrieval"]["status"], "not-eligible")
+
+    def test_v1_normalization_selects_legacy_first_source_as_primary(self) -> None:
+        legacy = {"schemaVersion": 1, "state": "proceed", "sourceViews": [{"role": "reference", "path": "legacy.png"}], "route": "procedural-finish", "exactnessTier": "image-only", "warnings": []}
+        normalized = normalize_manifest(legacy)
+        self.assertEqual(normalized["primaryImage"]["path"], "legacy.png")
+        self.assertEqual(normalized["primaryImage"]["role"], "primary")
 
     def test_manifest_write_is_atomic_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reference = Path(directory) / "knife.png"
             output = Path(directory) / "cs2-intake.json"
             write_png(reference)
-            classification = build_classification_record("knife", "karambit", 0.9, ["view:front:subject"])
-            manifest = build_manifest(reference, classification)
+            manifest = build_manifest(reference)
             persist_manifest(manifest, output)
-            self.assertEqual(json.loads(output.read_text())["schemaVersion"], 1)
+            self.assertEqual(json.loads(output.read_text())["schemaVersion"], 2)
+            brief = output.parent / "cs2-internal-brief.json"
+            self.assertEqual(json.loads(brief.read_text())["authority"], "report-only")
             self.assertFalse(output.with_suffix(".json.tmp").exists())
 
 
