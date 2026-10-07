@@ -1,18 +1,6 @@
 #!/usr/bin/env node
-// img2threejs CLI — installs the img2threejs skill into supported agent hosts.
-//
-// Subcommands:
-//   install [--host hermes|claude|codex|opencode|all] [--ref <tag-or-sha>] [--dry-run]
-//     Fetches the skill at the given ref (default: latest published skill CLI version) and links
-//     it into the requested host's skills directory via `npx img2 add img2threejs/img2threejs`.
-//   update   — same as install, but rejects downgrades
-//   doctor   — reports which hosts are detected and whether they already link to img2threejs
-//   version  — prints this CLI version + the skill version that will be installed
-//
-// Safety:
-//   - No shell. All subprocess calls go through `execFileSync` with argv arrays.
-//   - Every ref must be a vX.Y.Z tag or 40-char SHA — branches are rejected.
-//   - Resolution is delegated to `img2 add` — single source of truth for plugin/skill install.
+// Installs the base skill from a pinned Git ref. The img2 harness installs plugins,
+// not this repository (which intentionally has no plugin.json).
 
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -20,8 +8,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 const SKILL_REPO = 'img2threejs/img2threejs'
-// Default to the skill's current stable tag. Bumped in lockstep with the skill's semver —
-// the rule that no other CLI knows which skill version matches which CLI version.
+const SKILL_URL = `https://github.com/${SKILL_REPO}.git`
+// CLI semver is independent of the skill release; bump this ref for a new default.
 const DEFAULT_REF = 'v2.0.0'
 
 const HOSTS = {
@@ -58,7 +46,8 @@ const EXIT = { OK: 0, FAIL: 1, REFUSED: 2, NEEDS_INPUT: 3 }
 // Ref validation: must be a tag like `v1.2.3`, `v2.0.0-beta.1` or a full 40-char SHA.
 // Anything mutable (branch name, HEAD, short SHA) is rejected — a moved branch is a different
 // skill on a different day, and a short SHA can become two things after a push.
-const REF_RE = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$|^[0-9a-f]{40}$/
+const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/
+const REF_RE = /^[0-9a-f]{40}$/
 
 function die(code, msg, detail) {
   const e = new Error(msg)
@@ -71,9 +60,11 @@ function readArgs(argv) {
   const out = { cmd: argv[2], host: 'all', ref: DEFAULT_REF, dryRun: false }
   for (let i = 3; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--host') out.host = argv[++i]
-    else if (a === '--ref') out.ref = argv[++i]
-    else if (a === '--dry-run') out.dryRun = true
+    if (a === '--host' || a === '--ref') {
+      const value = argv[++i]
+      if (!value || value.startsWith('--')) die(EXIT.NEEDS_INPUT, `${a} needs a value`)
+      out[a === '--host' ? 'host' : 'ref'] = value
+    } else if (a === '--dry-run') out.dryRun = true
     else die(EXIT.NEEDS_INPUT, `unknown argument: ${a}`)
   }
   return out
@@ -92,7 +83,9 @@ Hosts:
   hermes, claude, codex, opencode, all (default: auto-detect all installed)
 
 Ref:
-  Semantic tag (vX.Y.Z) or 40-char commit SHA. Branches and short SHAs are refused.
+  Semantic tag (vX.Y.Z, optionally prerelease) or 40-char commit SHA.
+  Branches and short SHAs are refused. Requires Git and network access.
+  --dry-run prints the plan without downloads or filesystem changes.
 
 Examples:
   img2threejs install
@@ -113,40 +106,76 @@ function detectHosts(hostArg) {
 }
 
 function validateRef(ref) {
-  if (!REF_RE.test(ref)) {
+  if (!(ref?.startsWith('v') && VERSION_RE.test(ref.slice(1))) && !REF_RE.test(ref)) {
     die(EXIT.REFUSED, `ref must be a vX.Y.Z tag or 40-char SHA — got: ${ref}`,
         'branches and short SHAs are refused because a moving ref would be a different skill')
   }
 }
 
-function runImg2Add(ref, dryRun) {
-  // Delegate everything to the existing plugin harness. Single source of truth for
-  // plugin/skill installation — no parallel fetch/link path to drift out of sync.
-  const args = [
-    'img2', 'add',
-    SKILL_REPO,
-    '--ref', ref,
-    ...(dryRun ? ['--dry-run'] : []),
-  ]
+function releasesDir() {
+  return path.join(os.homedir(), '.img2threejs', 'releases')
+}
+
+function git(args, cwd) {
+  return execFileSync('git', args, {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  }).trim()
+}
+
+function skillVersion(dir) {
+  const text = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8')
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1]
+  const version = /^version:\s*(\S+)\s*$/m.exec(frontmatter || '')?.[1]
+  if (!VERSION_RE.test(version || '')) die(EXIT.FAIL, `invalid skill version in ${dir}/SKILL.md`)
+  return version
+}
+
+function compareVersions(a, b) {
+  const left = VERSION_RE.exec(a), right = VERSION_RE.exec(b)
+  for (let i = 1; i <= 3; i++) {
+    if (BigInt(left[i]) !== BigInt(right[i])) return BigInt(left[i]) > BigInt(right[i]) ? 1 : -1
+  }
+  if (left[4] === right[4]) return 0
+  if (!left[4]) return 1
+  if (!right[4]) return -1
+  const x = left[4].split('.'), y = right[4].split('.')
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === undefined) return -1
+    if (y[i] === undefined) return 1
+    if (x[i] === y[i]) continue
+    const xn = /^\d+$/.test(x[i]), yn = /^\d+$/.test(y[i])
+    if (xn && yn) return BigInt(x[i]) > BigInt(y[i]) ? 1 : -1
+    if (xn !== yn) return xn ? -1 : 1
+    return x[i] > y[i] ? 1 : -1
+  }
+  return 0
+}
+
+function managedLink(link) {
   try {
-    const out = execFileSync('npx', ['--yes', ...args], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      encoding: 'utf8',
-      env: { ...process.env, NPM_CONFIG_FUND: 'false', NPM_CONFIG_AUDIT: 'false' },
-      timeout: 120_000,
-    })
-    return { ok: true, out }
-  } catch (err) {
-    return { ok: false, err, stderr: err.stderr?.toString() ?? '', stdout: err.stdout?.toString() ?? '' }
+    if (!fs.lstatSync(link).isSymbolicLink()) return false
+    const target = fs.realpathSync(link)
+    const root = fs.realpathSync(releasesDir())
+    const relative = path.relative(root, target)
+    return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' &&
+      !path.isAbsolute(relative) && path.basename(target) === 'img2threejs'
+  } catch {
+    return false
   }
 }
 
-function linkPointsAtImg2threejs(linkPath) {
-  try {
-    const target = fs.realpathSync(linkPath)
-    return target.endsWith(`/img2threejs`)
-  } catch {
-    return false
+function checkLinks(hosts) {
+  for (const h of hosts) {
+    const link = path.join(HOSTS[h].skills(), 'img2threejs')
+    try {
+      fs.lstatSync(link)
+    } catch (err) {
+      if (err.code === 'ENOENT') continue
+      throw err
+    }
+    if (!managedLink(link)) die(EXIT.REFUSED, `refusing to replace an unmanaged skill at ${link}`,
+      'move the existing entry yourself before installing with this CLI')
   }
 }
 
@@ -154,59 +183,91 @@ async function cmdInstall(args) {
   validateRef(args.ref)
   const hosts = detectHosts(args.host)
   if (hosts.length === 0) die(EXIT.REFUSED, 'no supported agent host detected on this machine')
-
-  process.stdout.write(`→ will install skill ${SKILL_REPO} @ ${args.ref} into: ${hosts.join(', ')}\n`)
-  if (args.dryRun) process.stdout.write('  (dry-run: npx img2 will be invoked with --dry-run)\n')
-
-  const result = runImg2Add(args.ref, args.dryRun)
-  if (!result.ok) {
-    process.stderr.write(`img2 add failed:\n${result.stderr || result.err?.message}\n`)
-    process.exit(EXIT.FAIL)
+  checkLinks(hosts)
+  process.stdout.write(`→ ${args.cmd} skill ${SKILL_REPO} @ ${args.ref} into: ${hosts.join(', ')}\n`)
+  if (args.dryRun) {
+    process.stdout.write('(dry-run: no downloads or filesystem changes; ref availability and downgrade checks require a real run)\n')
+    return
   }
-  process.stdout.write(result.out)
 
-  // Idempotency check: confirm a skills/img2threejs entry exists for each requested host.
-  let linked = 0
-  for (const h of hosts) {
-    const dir = HOSTS[h].skills()
-    const link = path.join(dir, 'img2threejs')
-    if (fs.existsSync(link) && linkPointsAtImg2threejs(link)) {
-      process.stdout.write(`✓ ${h}: ${link}\n`)
-      linked++
-    } else if (!args.dryRun) {
-      process.stdout.write(`! ${h}: expected link at ${link} not present — open an issue at https://github.com/${SKILL_REPO}/issues\n`)
+  const root = releasesDir()
+  fs.mkdirSync(root, { recursive: true })
+  const staging = fs.mkdtempSync(path.join(root, '.staging-'))
+  const checkout = path.join(staging, 'img2threejs')
+  try {
+    fs.mkdirSync(checkout)
+    git(['init', '--quiet', checkout])
+    git(['remote', 'add', 'origin', SKILL_URL], checkout)
+    const fetchRef = args.ref.startsWith('v') ? `refs/tags/${args.ref}` : args.ref
+    git(['fetch', '--quiet', '--depth=1', 'origin', fetchRef], checkout)
+    git(['checkout', '--quiet', '--detach', 'FETCH_HEAD'], checkout)
+    const sha = git(['rev-parse', 'HEAD'], checkout)
+    if (REF_RE.test(args.ref) && sha !== args.ref) die(EXIT.FAIL, 'fetched commit does not match requested SHA')
+    const version = skillVersion(checkout)
+    if (args.cmd === 'update') {
+      for (const h of hosts) {
+        const link = path.join(HOSTS[h].skills(), 'img2threejs')
+        if (managedLink(link) && compareVersions(version, skillVersion(link)) < 0) {
+          die(EXIT.REFUSED, `refusing downgrade for ${h}: ${skillVersion(link)} → ${version}`)
+        }
+      }
     }
-  }
-  if (!args.dryRun && linked === 0) {
-    die(EXIT.FAIL, 'install reported success but no host link was found')
+    const release = path.join(root, sha)
+    const target = path.join(release, 'img2threejs')
+    if (!fs.existsSync(release)) {
+      fs.renameSync(staging, release)
+    } else {
+      if (git(['rev-parse', 'HEAD'], target) !== sha ||
+          git(['status', '--porcelain', '--untracked-files=all'], target) !== '') {
+        die(EXIT.REFUSED, `managed checkout has local changes: ${target}`)
+      }
+      skillVersion(target)
+    }
+    checkLinks(hosts)
+    for (const h of hosts) {
+      const dir = HOSTS[h].skills()
+      const link = path.join(dir, 'img2threejs')
+      fs.mkdirSync(dir, { recursive: true })
+      // Rename a temporary symlink over an owned link; never delete a user directory.
+      const temporary = path.join(dir, `.img2threejs-${process.pid}`)
+      try {
+        fs.symlinkSync(target, temporary, 'dir')
+        fs.renameSync(temporary, link)
+      } finally {
+        if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+      }
+      if (fs.realpathSync(link) !== fs.realpathSync(target)) die(EXIT.FAIL, `host link verification failed: ${link}`)
+      process.stdout.write(`✓ ${h}: ${link} → ${target} (${version}, ${sha})\n`)
+    }
+  } catch (err) {
+    if (typeof err.code === 'number') throw err
+    die(EXIT.FAIL, `skill ${args.cmd} failed: ${err.message}`, err.stderr?.toString().trim())
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true })
   }
 }
 
 async function cmdDoctor() {
   process.stdout.write('img2threejs — host detection report\n\n')
   for (const [name, h] of Object.entries(HOSTS)) {
-    const detected = h.detect()
     const dir = h.skills()
-    let linkState = '(no link)'
-    if (detected) {
-      const link = path.join(dir, 'img2threejs')
-      if (fs.existsSync(link)) {
-        linkState = linkPointsAtImg2threejs(link)
-          ? `installed → ${fs.realpathSync(link)}`
-          : `link exists but does not point at ${SKILL_REPO} — run \`img2threejs install\``
+    const link = path.join(dir, 'img2threejs')
+    let state = '(no link)'
+    try {
+      fs.lstatSync(link)
+      state = `${managedLink(link) ? 'managed' : 'unmanaged'} → ${fs.realpathSync(link)} (${skillVersion(link)})`
+    } catch (err) {
+      if (err.code !== 'ENOENT' || fs.existsSync(dir) && fs.readdirSync(dir).includes('img2threejs')) {
+        state = `invalid skill: ${err.message}`
       }
     }
-    const detectedLabel = detected ? '✓ detected' : '✗ not detected'
-    process.stdout.write(`  ${name.padEnd(10)}  ${detectedLabel.padEnd(15)}  ${dir}  ${linkState}\n`)
+    process.stdout.write(`  ${name.padEnd(10)}  ${h.detect() ? '✓ detected' : '✗ not detected'}  ${dir}  ${state}\n`)
   }
-  let img2 = '(not probed)'
   try {
-    const v = execFileSync('npx', ['--yes', 'img2', '--version'], { encoding: 'utf8', timeout: 30_000 }).trim()
-    img2 = `✓ npx img2 — ${v.split('\n')[0]}`
+    process.stdout.write(`\n  ✓ ${git(['--version'])}\n`)
   } catch {
-    img2 = '✗ npx img2 not reachable (will be installed on first \`install\` run)'
+    process.stdout.write('\n  ✗ Git unavailable — required for install/update\n')
   }
-  process.stdout.write(`\n  ${img2}\n`)
 }
 
 async function cmdVersion() {
@@ -217,7 +278,7 @@ async function cmdVersion() {
 
 const commands = {
   install: cmdInstall,
-  update: (args) => { process.stdout.write('(update = install with downgrade rejection; same args)\n'); return cmdInstall(args) },
+  update: cmdInstall,
   doctor: cmdDoctor,
   version: cmdVersion,
   '--version': cmdVersion,

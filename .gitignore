@@ -19,7 +19,7 @@ docs/PLAN_*.md
 .omc/
 .omo/
 
-# npm / Node — kept out of the repo. The CLI is shipped as source via `files: ["bin"]` + tarball.
+# npm / Node — kept out of the repo. The tarball ships only bin/img2threejs.mjs.
 node_modules/
 package-lock.json
 npm-debug.log*

@@ -124,6 +124,39 @@ A staged sculpting pipeline turns the reference image into a spec, then generate
    ~/.codex/skills/img2threejs  -> <your checkout>
    ```
 
+   **CLI installer (Node.js >= 18 and Git):** available as
+   [`img2threejs` on npm](https://www.npmjs.com/package/img2threejs):
+
+   ```bash
+   npx img2threejs install --dry-run
+   npx img2threejs install                # all detected hosts
+   npx img2threejs install --host claude   # only this host
+   npx img2threejs update --ref v2.0.0
+   npx img2threejs doctor
+   ```
+
+   Or install the CLI globally, then install the skill:
+
+   ```bash
+   npm install -g img2threejs
+   img2threejs install
+   ```
+
+   Supported host directories are `~/.hermes`, `~/.claude`, `~/.codex`, and
+   `$XDG_CONFIG_HOME/opencode` (default `~/.config/opencode`). The CLI fetches the
+   base skill directly from GitHub at `v2.0.0` by default; `--ref` accepts a
+   semantic tag (including prereleases) or full 40-character commit SHA, not a branch.
+   Checkouts live under `~/.img2threejs/releases/<sha>/img2threejs`; hosts installing
+   the same commit share that checkout. `update` refuses lower skill versions, including
+   prerelease downgrades. The CLI does not overwrite manual installs or unrelated links.
+   Move those entries yourself to switch to CLI-managed installs. `--dry-run` is offline
+   and writes nothing; it does not verify that a remote ref exists or check downgrades.
+   The base skill is not a plugin: `img2 add` is only for the optional plugins below.
+
+   To test the CLI directly from this checkout, run
+   `node bin/img2threejs.mjs install --dry-run`. See [CONTRIBUTING.md](CONTRIBUTING.md)
+   for tarball and publication checks.
+
 2. **Add domain plugins (optional)** — domain knowledge (CS2 skins today) lives in installed
    plugins, not in this checkout. Install the [img2 harness](https://github.com/img2threejs/img2)
    once, then add plugins to it:
