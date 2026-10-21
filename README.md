@@ -82,7 +82,7 @@ The gallery source lives in [img2threejs/img2threejs-showcase](https://github.co
 
 You give it one reference image of an object. It produces a `THREE.Group` factory written in TypeScript that recreates that object from primitives, procedural shaders, and generated geometry — with a runtime hierarchy (pivots, sockets, colliders) so the result is ready to animate, not an inert lump.
 
-It runs under Claude Code, Codex, or OpenCode. It is agent-agnostic: wherever the docs say "agent vision" or "agent browser tool", it uses whatever the host provides — native image reading, a browser MCP, the project preview, or a user-supplied screenshot.
+It runs under Hermes, Claude Code, Codex, or OpenCode. It is agent-agnostic: wherever the docs say "agent vision" or "agent browser tool", it uses whatever the host provides — native image reading, a browser MCP, the project preview, or a user-supplied screenshot.
 
 ### Subjects and detail accuracy
 
@@ -99,9 +99,6 @@ It runs under Claude Code, Codex, or OpenCode. It is agent-agnostic: wherever th
 
 ## How it works
 
-A staged sculpting pipeline turns the reference image into a spec, then generates and vision-reviews one build pass at a time — `blockout → structural → form → material → surface → lighting → interaction → optimization` — self-correcting until every identity-defining feature clears its threshold.
-
-**→ Full pipeline diagram, gates, self-correction logic, and the token-efficiency design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 A staged sculpting pipeline turns the reference image into a spec, then generates and vision-reviews one build pass at a time — `blockout → structural → form → material → surface → lighting → interaction → optimization` — self-correcting until every identity-defining feature clears its threshold. Deterministic Python scripts handle validation and gating; model tokens are spent only on visual judgment and code.
 
 **→ Full pipeline diagram, gates, self-correction logic, script reference, and the token-efficiency design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
@@ -110,98 +107,40 @@ A staged sculpting pipeline turns the reference image into a spec, then generate
 
 ## Quick start
 
-### Which project and CLI do I need?
-
-| Project | Role | CLI |
-|---|---|---|
-| **[img2threejs](https://github.com/img2threejs/img2threejs)** — this repository | Base reconstruction skill, procedural Three.js pipeline, scripts and quality gates | `npx --yes img2threejs@latest <command>` |
-| **[img2](https://github.com/img2threejs/img2)** | Optional plugin harness: catalog, registry, host links and capability lookup | `npx --yes @img2threejs/img2@latest <command>` |
-| **Domain and output plugins** — linked below | Additional workflows, domain rules or explicitly selected output routes | Install through `img2 add <plugin-id>` |
-
-The two CLIs are separate packages with independent versions. Installing the harness does
-**not** install this base skill; adding a plugin does **not** generate a model.
-Start with the base skill. Add the harness only when you need plugins.
+Needs **Node.js ≥ 18, Git and Python ≥ 3.10**, and one of Claude Code, Codex, OpenCode or Hermes.
 
 ### 1. Install the base skill
 
-The CLI needs **Node.js ≥ 18 and Git**; the reconstruction scripts need **Python ≥ 3.10**.
-Configure your agent host first. The base installer detects Hermes, Claude Code, Codex and
-OpenCode; the plugin harness currently integrates with Claude Code, Codex and OpenCode.
-
-Preview, install into all detected hosts, then inspect their base-skill links:
-
 ```bash
-npx --yes img2threejs@latest install --dry-run
-npx --yes img2threejs@latest install
-npx --yes img2threejs@latest doctor
+npx --yes img2threejs@latest install   # links the skill into every agent it finds
+npx --yes img2threejs@latest doctor    # one line per agent: "managed" means installed
 ```
 
-To install into just one detected host instead, use:
+**Hermes users**, also link the skill into your profile (the installer only writes `~/.hermes/skills/`):
 
 ```bash
-npx --yes img2threejs@latest install --host claude
+ln -sfn ~/.hermes/skills/img2threejs ~/.hermes/profiles/${HERMES_ACTIVE_PROFILE:-img2threejs}/skills/img2threejs
 ```
 
-The `--yes` above belongs to **npx**, allowing the CLI package download. It is not an
-overwrite flag for the base installer.
-
-Supported host directories are `~/.hermes`, `~/.claude`, `~/.codex`, and
-`$XDG_CONFIG_HOME/opencode` (default `~/.config/opencode`). The CLI fetches the base skill
-from GitHub at `v2.0.0` by default. Its `--ref` accepts a semantic tag (including prereleases)
-or a full 40-character commit SHA, **not a branch**:
-
-```bash
-npx --yes img2threejs@latest update --ref v2.0.0
-```
-
-Checkouts live under `~/.img2threejs/releases/<sha>/img2threejs`; hosts installing the same
-commit share that checkout. `update` refuses lower skill versions, including prerelease
-downgrades. The installer refuses manual installs and unrelated links rather than
-overwriting them. Keep those installations, or deliberately move their entries yourself
-before switching to CLI-managed installs. `--dry-run` is offline and writes nothing; it
-does not verify remote ref availability or downgrades.
-
-**Manual alternative — choose this or the CLI, not both at the same skill path:**
-
-```bash
-git clone https://github.com/img2threejs/img2threejs.git ~/.claude/skills/img2threejs
-```
-
-For multiple hosts, keep one checkout and point each host's `img2threejs` skill entry at
-it with a symlink so copies cannot drift apart. A manual clone follows the repository's
-default branch rather than the CLI's pinned release.
-
-You can also install the CLI globally with `npm install -g img2threejs`, then run
-`img2threejs install`. To test it from this checkout, run
-`node bin/img2threejs.mjs install --dry-run`; see [CONTRIBUTING.md](CONTRIBUTING.md)
-for packaging and publication checks.
+Then **restart your agent** and go to [step 4](#4-run-a-reconstruction-in-your-agent). Prefer to let
+your agent install it, want a manual or single-agent install, or something failed:
+[`docs/INSTALL.md`](docs/INSTALL.md) (paste-to-agent prompt, expected output, troubleshooting,
+update and uninstall, other agents such as Cursor).
 
 ### 2. Install the plugin harness, if needed
 
-Use harness CLI **0.4.0 or newer** for short plugin IDs:
+Skip this unless you need a plugin from the table below. Plugins come from a separate CLI, the
+`img2` harness (`~/.img2`); install it once:
 
 ```bash
 npx --yes @img2threejs/img2@latest install --yes
-npx --yes @img2threejs/img2@latest plugins
+npx --yes @img2threejs/img2@latest plugins       # the live catalog
 ```
 
-The harness uses `~/.img2` and tries to link an `img2` launcher onto your `PATH`. Read
-the install output for its location. `plugins` lists the official live catalog; `list`
-shows registrations on your machine.
-
-For short commands that use the latest published harness, set this bash/zsh alias:
-
-```bash
-alias img2='npx --yes @img2threejs/img2@latest'
-```
-
-It lasts for this shell session. Add it to `~/.zshrc` and run `source ~/.zshrc` to keep
-it in future zsh sessions. Every `img2 ...` command below also works with the explicit
-`npx --yes @img2threejs/img2@latest ...` prefix. An existing harness checkout and its
-older launcher are not automatically upgraded by running `install` again.
-
-The first `--yes` in the harness install command belongs to npx; the final one skips
-the harness consent prompt. Neither permits replacing an existing plugin.
+It links an `img2` command if `~/.local/bin`, `/opt/homebrew/bin` or `/usr/local/bin` is on your
+`PATH`; otherwise use the `npx --yes @img2threejs/img2@latest` form, or
+`alias img2='npx --yes @img2threejs/img2@latest'`. What it changes on your machine:
+[`docs/INSTALL.md` §3](docs/INSTALL.md#3-add-a-plugin-only-if-you-need-one).
 
 ### 3. Choose plugins — do not install everything by default
 
@@ -215,11 +154,10 @@ the harness consent prompt. Neither permits replacing an existing plugin.
 
 These are announced plugins; use `img2 plugins` for the current catalog. Open each
 plugin's linked README for its input requirements, dependencies and tool setup.
-For CS2 and character workflows:
+For example, the CS2 plugin:
 
 ```bash
 img2 add cs2 --yes
-img2 add character --yes
 img2 list
 img2 doctor
 img2 sync --check
@@ -231,23 +169,16 @@ installed, the base has `generic` and `character` profiles. A profile whose plug
 missing (`cs2`, `animated-character`) fails loud naming what is installed; it never silently
 downgrades. The base skill is not a plugin: **do not use `img2 add` to install this repository.**
 
-**Private environment source:** GitHub access and working Git credentials are required.
-The link may return 404 when you are signed out or lack permission. The public
-[`img2-environment` npm installer](https://www.npmjs.com/package/img2-environment) can
-bootstrap the harness, but does not grant access to the private source:
-
-```bash
-npx --yes img2-environment install --dry-run
-npx --yes img2-environment install --yes
-```
-
-That installer has its own SDK pin and may retain older CLI presentation.
-For lifecycle and trust details, read the [harness usage guide](https://github.com/img2threejs/img2#quickstart).
+**Private `environment` plugin:** needs a GitHub account with access to its repository and working
+Git credentials. The public [`img2-environment`](https://www.npmjs.com/package/img2-environment)
+installer can bootstrap the harness but does not grant that access. Hermes users link each plugin
+by hand ([`docs/INSTALL.md` §3](docs/INSTALL.md#3-add-a-plugin-only-if-you-need-one)). Why a run
+cannot see an installed plugin, and how plugins reach the pipeline: [`docs/PLUGINS.md`](docs/PLUGINS.md).
 To write a plugin, follow [WRITING_A_PLUGIN.md](https://github.com/img2threejs/img2/blob/main/docs/WRITING_A_PLUGIN.md).
 
 ### 4. Run a reconstruction in your agent
 
-Start a new agent session or restart the current one after installing skills.
+Restart the agent (or start a new session) after installing skills.
 In Claude Code, attach an image or give its path and invoke:
 
 ```text
@@ -292,16 +223,9 @@ Neither doctor command proves visual likeness or animation quality; those requir
 reconstruction's render and domain gates. `img2 update --check` exits 1 when an update is
 pending, not only on errors. Local `--link` checkouts are live and are not fetched by update.
 
-| Finding / refusal | Meaning and next action |
-|---|---|
-| `WARN ... multi-capability provider` | The plugin declares multiple capabilities; each edge resolves independently. This warning alone does not fail `img2 doctor`. Do not delete capabilities or reinstall just to remove it. |
-| `FAIL ... opencode link missing` | The reported OpenCode skill link is missing. Inspect the reported path and registered checkout; it is not proof that the reconstruction code is broken. `sync` regenerates harness data, not host links. |
-| Plugin already registered | Use `img2 list` and `img2 update <id>`, not another ordinary `add`. Use `add --force` only when deliberately replacing a registration; it backs up and reinstalls rather than merely repairing a link. |
-| Unmanaged base skill | Keep the manual checkout, or deliberately move its host entry before using the base installer. The base CLI does not overwrite it. |
-| Private source returns 404 / access denied | Sign in with a GitHub account authorized for that repository and configure Git credentials. A public npm installer cannot bypass source permissions. |
-
-For plugin audit exit codes, replacement behavior and additional troubleshooting, see
-the [img2 README](https://github.com/img2threejs/img2#refs-replacement-and-common-refusals).
+Symptoms and fixes: [`docs/INSTALL.md` §6](docs/INSTALL.md#6-when-something-is-off); plugin
+audit exit codes and replacement behaviour: the
+[img2 README](https://github.com/img2threejs/img2#refs-replacement-and-common-refusals).
 
 ### Driving it harder
 
