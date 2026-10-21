@@ -92,7 +92,7 @@ python3 forge/state.py mark <step-id> --state .img2threejs/state.json --evidence
   silent omission is forbidden. Loop counts derive from `reviewHistory` actions
   (`refine-spec`/`refine-code`), not agent memory. Defaults: 3 corrections per pass, 6 total.
 - A domain profile's steps, gates and reference material come from the **registry**: in-repo
-  modules (`character`) and installed plugins (`cs2`, `animated-character` from plugin-character) register identically, and
+  modules (`character`) and installed plugins (e.g. `cs2`) register identically, and
   `forge/state.py init` names what is available. A profile adds mandatory gates without changing
   the core order -- a domain plugin typically requires an authoritative classification, an intake
   manifest, and a machine-readable domain review before AI review; `character` requires the
@@ -407,6 +407,7 @@ a missing profile is handled by the preflight above, and only a plugin that does
 upstream is a blocker to report.
 
 ```bash
+img2 plugins                                      # list plugins
 img2 add img2threejs/plugin-<id> --ref <tag>      # install a plugin at a tag (e.g. plugin-cs2)
 img2 doctor                                       # what each host resolves: base-skill path + version, plugin gates
 img2 capabilities --from-kind image --to-kind glb # which installed plugin serves an edge

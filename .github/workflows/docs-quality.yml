@@ -3,6 +3,8 @@ name: Docs quality
 # Deterministic, stdlib-only gates (scripts/ci/*.py, Python 3.10). No third-party actions.
 on:
   pull_request:
+    # `edited` re-runs pr-scope when only the PR title changes.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
